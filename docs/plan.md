@@ -69,7 +69,7 @@ to consume before starting the TUI.
 
 **Deliverable:** a full-screen Rust TUI using the M0a command/output contract.
 
-1. Choose a Rust TUI framework. Add `cmd-center tui` with keyboard navigation,
+1. Choose a Rust TUI framework. Add `argos tui` with keyboard navigation,
    search/filter, selected-session details, host status and contextual help.
 2. Invoke CLI read commands asynchronously with `--json`; render structured data and
    errors rather than scraping terminal tables. Keep filtering/selection in the TUI,
@@ -180,7 +180,7 @@ For the proposed devenv path, completion means the selected real stack runs thro
 the pinned devenv supervisor with working readiness, shutdown and reboot behavior.
 If another tooling layer is chosen, update this scope and its checks explicitly.
 
-## M2: manage task environments through cmd-center
+## M2: manage task environments through argos
 
 **Deliverable:** the same interface lists unmanaged host sessions and managed VM work.
 

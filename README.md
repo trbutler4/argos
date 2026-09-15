@@ -1,4 +1,4 @@
-# cmd-center
+# Argos
 
 A command center for NixOS machines: **Rust CLI first, then a full-screen
 TUI consuming its structured output**.
@@ -14,7 +14,7 @@ Nothing currently provisions or connects to remote hosts.
 ## Try the first slice
 
 ```sh
-cd cmd-center
+cd argos
 nix develop
 cargo run --quiet --locked -- list
 cargo run --quiet --locked -- list --json
@@ -35,7 +35,7 @@ error, with diagnostics on stderr.
 ### Nix package and installation
 
 ```sh
-nix build                       # result/bin/cmd-center
+nix build                       # result/bin/argos
 nix run . -- list                # no dev shell needed
 ```
 
@@ -43,25 +43,25 @@ The release package includes tmux on its runtime PATH. Rust/Cargo are only build
 and development dependencies. To use the published package without installation:
 
 ```sh
-nix run github:trbutler4/cmd-center -- list
+nix run github:trbutler4/argos -- list
 ```
 
 To install declaratively, add the flake input to your NixOS flake:
 
 ```nix
-inputs.cmd-center.url = "github:trbutler4/cmd-center";
-inputs.cmd-center.inputs.nixpkgs.follows = "nixpkgs";
+inputs.argos.url = "github:trbutler4/argos";
+inputs.argos.inputs.nixpkgs.follows = "nixpkgs";
 ```
 
 Pass `inputs` through `home-manager.extraSpecialArgs`, then add this to the desired
 Home Manager user's module (which accepts `{ inputs, pkgs, ... }`):
 
 ```nix
-home.packages = [ inputs.cmd-center.packages.${pkgs.stdenv.hostPlatform.system}.default ];
+home.packages = [ inputs.argos.packages.${pkgs.stdenv.hostPlatform.system}.default ];
 ```
 
 Rebuild your NixOS configuration to activate it. Later updates are explicit:
-`nix flake update cmd-center`, followed by your normal system rebuild. During local
+`nix flake update argos`, followed by your normal system rebuild. During local
 development use `cargo run` or `nix run .` before publishing and updating the pin.
 
 ### Development checks
@@ -82,8 +82,8 @@ The dev shell and Rust dependencies are pinned in `flake.lock` and `Cargo.lock`.
 
 ## Local configuration (planned)
 
-Machine-specific inventory belongs in `$XDG_CONFIG_HOME/cmd-center/config.toml`,
-defaulting to `~/.config/cmd-center/config.toml`, outside this repository.
+Machine-specific inventory belongs in `$XDG_CONFIG_HOME/argos/config.toml`,
+defaulting to `~/.config/argos/config.toml`, outside this repository.
 `examples/config.toml` is a generic proposed schema, not an active configuration.
 **The current CLI does not load this file yet.** Host aliases, project paths and
 machine defaults will remain local when multi-machine discovery is implemented.
@@ -104,7 +104,7 @@ Credentials should stay in existing SSH/keychain tooling, not in this inventory.
 ## What the interface should feel like
 
 ```text
-cmd-center
+argos
   workstation                                     online
     config            host tmux     attached
     app-feature       VM running    stack ready       [app]
@@ -134,20 +134,20 @@ Existing host tmux sessions can be listed and attached without registering a pro
 
 ## Proposed command surface
 
-Use `cmd-center`, not `cc` (which commonly names the C compiler).
+The executable is named `argos`.
 
 ```text
-cmd-center                              # CLI help initially
-cmd-center tui                          # full-screen TUI, added after the CLI
-cmd-center list                         # human-readable hosts and sessions
-cmd-center list --json                  # structured snapshot for the TUI/scripts
-cmd-center attach <machine/session>     # attach an existing session
-cmd-center env create <project> --host <machine> --name <task>
-cmd-center env start <machine/environment>
-cmd-center env stop <machine/environment>
-cmd-center open <machine/environment> [service]
-cmd-center env inspect <machine/environment>
-cmd-center env destroy <machine/environment>  # explicit destructive confirmation
+argos                              # CLI help initially
+argos tui                          # full-screen TUI, added after the CLI
+argos list                         # human-readable hosts and sessions
+argos list --json                  # structured snapshot for the TUI/scripts
+argos attach <machine/session>     # attach an existing session
+argos env create <project> --host <machine> --name <task>
+argos env start <machine/environment>
+argos env stop <machine/environment>
+argos open <machine/environment> [service]
+argos env inspect <machine/environment>
+argos env destroy <machine/environment>  # explicit destructive confirmation
 ```
 
 Only local `list`, `list --json`, and help are implemented today. Other commands

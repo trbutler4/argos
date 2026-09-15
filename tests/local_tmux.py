@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("CMD_CENTER_BINARY", ROOT / "target/debug/cmd-center"))
+BINARY = Path(os.environ.get("ARGOS_BINARY", ROOT / "target/debug/argos"))
 
 
 def run(*args, env=None):
@@ -43,7 +43,7 @@ def main():
     cli("list", "--socket", code=2)
 
     base = os.environ.get("XDG_RUNTIME_DIR")
-    with tempfile.TemporaryDirectory(prefix="cc-test-", dir=base) as directory:
+    with tempfile.TemporaryDirectory(prefix="argos-test-", dir=base) as directory:
         directory = Path(directory)
         path = directory / "tmux.sock"
         tmux_args = ["tmux", "-u", "-S", str(path), "-f", "/dev/null"]
@@ -68,7 +68,7 @@ def main():
 
         # Test missing runtime dependency through the actual binary's public interface.
         no_tools = dict(os.environ, PATH=str(directory / "empty-path"))
-        if os.environ.get("CMD_CENTER_PACKAGED"):
+        if os.environ.get("ARGOS_PACKAGED"):
             # The Nix wrapper must supply its own tmux runtime dependency.
             assert snapshot(path, env=no_tools)["status"] == "ok"
         else:

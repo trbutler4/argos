@@ -7,7 +7,7 @@ mod tmux;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "cmd-center",
+    name = "argos",
     version,
     about = "A local command center for tmux work"
 )]

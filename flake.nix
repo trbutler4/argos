@@ -1,5 +1,5 @@
 {
-  description = "Personal cmd-center CLI and development tools";
+  description = "Personal argos CLI and development tools";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/dc5d91f840324650bac8c379428c7037a416959a";
 
@@ -10,29 +10,29 @@
       packages = nixpkgs.lib.genAttrs systems (system:
         let pkgs = import nixpkgs { inherit system; };
         in rec {
-          cmd-center = pkgs.rustPlatform.buildRustPackage {
-            pname = "cmd-center";
+          argos = pkgs.rustPlatform.buildRustPackage {
+            pname = "argos";
             version = "0.1.0";
             src = pkgs.lib.cleanSource ./.;
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postInstall = ''
-              wrapProgram $out/bin/cmd-center \
+              wrapProgram $out/bin/argos \
                 --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.tmux ]}
             '';
             meta = {
               description = "Personal command center for tmux work";
-              mainProgram = "cmd-center";
+              mainProgram = "argos";
               platforms = systems;
             };
           };
-          default = cmd-center;
+          default = argos;
         });
 
       apps = nixpkgs.lib.genAttrs systems (system: {
         default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/cmd-center";
+          program = "${self.packages.${system}.default}/bin/argos";
         };
       });
 

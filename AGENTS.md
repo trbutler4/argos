@@ -1,4 +1,4 @@
-# cmd-center contributor guidance
+# argos contributor guidance
 
 This is a personal tool for one user's NixOS + Tailscale + tmux workflow.
 Read README.md, docs/architecture.md and docs/plan.md before implementation.
@@ -46,7 +46,7 @@ Do not mark implementation milestones complete from documentation checks.
 ## Public repository boundary
 
 - Keep machine-specific inventory outside this repository, at
-  `$XDG_CONFIG_HOME/cmd-center/config.toml` (default `~/.config/cmd-center/config.toml`).
+  `$XDG_CONFIG_HOME/argos/config.toml` (default `~/.config/argos/config.toml`).
   The loader is planned, not implemented. Commit only generic examples.
 - Do not commit local hostnames, usernames, project paths, private endpoints,
   credentials, captured session listings, or personal Git author email addresses.

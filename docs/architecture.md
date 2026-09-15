@@ -14,7 +14,7 @@ The VM details must pass
 | tmux | Persistent interactive sessions, panes, scrollback and manual agent terminals | VM or database supervision |
 | NixOS/systemd | Host capabilities, VM lifecycle and guest boot services | Project-specific tooling definitions |
 | devenv | Pinned project tooling, development processes, readiness and logs | VM creation or cross-machine discovery |
-| cmd-center | Inventory, selection, environment operations, connection and status | A new terminal emulator, process manager, VPN or Git hosting service |
+| argos | Inventory, selection, environment operations, connection and status | A new terminal emulator, process manager, VPN or Git hosting service |
 
 **Build the Rust CLI first (M0a), then the full-screen TUI (M0b).** Rust is chosen
 for learning, not a demonstrated performance need. The CLI is the canonical interface
@@ -64,7 +64,7 @@ user's SSH config. Do not scan or enroll every tailnet member automatically.
 - Read-only discovery executes bounded SSH commands as the configured normal user.
 - MVP queries the user's default tmux server. Explicit named sockets can be added
   when needed; do not enumerate other users' servers.
-- Discover ordinary sessions without requiring a cmd-center registry or repo marker.
+- Discover ordinary sessions without requiring a argos registry or repo marker.
 - Resolve the current machine locally, so attaching its local sessions need not use SSH.
 - Probe hosts concurrently, with bounded fan-out and a per-host connection timeout.
 - Distinguish offline, authentication failure, untrusted host key, missing tmux,
@@ -83,7 +83,7 @@ Do not embed tmux rendering in a homegrown terminal widget. Let the user's termi
 and SSH PTY carry the interactive session.
 
 - Outside tmux: selecting an item can hand the terminal to an SSH/tmux attachment;
-  detaching returns to cmd-center with the terminal restored.
+  detaching returns to argos with the terminal restored.
 - Inside local tmux: switch-client for a session on that same server, avoiding nesting.
 - For a remote session: use/reuse a dedicated local connection window. A short-lived
   picker popup must not own the remote process lifetime or become its only access path.
@@ -195,7 +195,7 @@ it accurately. Reuse a stable port per client/environment when available, and ha
 collisions rather than stealing or killing unrelated listeners. Track tunnels outside
 the transient picker so switching tasks does not close them. Clean up only owned tunnels.
 
-Here, client means the machine running cmd-center. A cmd-center process reached by
+Here, client means the machine running argos. A argos process reached by
 SSH on a headless machine cannot silently open the original laptop's browser. Run
 the browser-access client on the workstation, or print connection/tunnel instructions
 when no local graphical browser is available.
@@ -212,8 +212,8 @@ an explicit later option with firewall/ACL decisions.
 
 ## 7. State, operations and safety
 
-Static inventory/project defaults are planned at `$XDG_CONFIG_HOME/cmd-center/config.toml`
-(default `~/.config/cmd-center/config.toml`), outside the public repository and
+Static inventory/project defaults are planned at `$XDG_CONFIG_HOME/argos/config.toml`
+(default `~/.config/argos/config.toml`), outside the public repository and
 optionally rendered by Home Manager. The loader is not implemented yet. A proposed example is in `examples/config.toml`.
 The host owns managed environment state; clients cache observations, not authority.
 Two dashboards must be able to inspect the same environment without registry sync.
