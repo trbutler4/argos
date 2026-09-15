@@ -5,9 +5,10 @@ Read README.md, docs/architecture.md and docs/plan.md before implementation.
 
 ## Current phase
 
-The first Rust CLI slice implements read-only local `list` and `list --json`,
-with optional `--socket PATH`. No config loader, SSH, attach, TUI, VM runner or
-Nix module exists yet. Example TOML and other commands remain proposals.
+The Rust CLI implements read-only local/SSH `list`, JSON output, strict private
+TOML inventory, host filtering and deadlines. `--local`/`--socket` bypass implicit
+inventory. No attach, TUI or VM runner exists. `examples/config.toml` is active
+inventory schema, while `examples/environment-proposal.toml` is a future proposal.
 Do not mark implementation milestones complete from documentation checks.
 
 ## Keep the design focused
@@ -41,12 +42,13 @@ Do not mark implementation milestones complete from documentation checks.
   invalidate a VM backend or lifecycle assumption rather than hiding it behind an abstraction.
 - Commit focused changes. Enter `nix develop`, then run `cargo fmt --check`,
   `cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`,
-  `cargo build --locked`, and `python3 tests/local_tmux.py`.
+  `cargo build --locked`, `python3 tests/local_tmux.py`, and
+  `python3 tests/config_cli.py` and `python3 tests/remote_ssh.py`.
 
 ## Public repository boundary
 
 - Keep machine-specific inventory outside this repository, at
   `$XDG_CONFIG_HOME/argos/config.toml` (default `~/.config/argos/config.toml`).
-  The loader is planned, not implemented. Commit only generic examples.
+  Commit only generic examples.
 - Do not commit local hostnames, usernames, project paths, private endpoints,
   credentials, captured session listings, or personal Git author email addresses.

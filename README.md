@@ -7,11 +7,12 @@ TUI consuming its structured output**.
 regardless of which machine hosts it.** New tasks can get their own NixOS VM,
 separate Git clone, toolchain, backend processes, and database state.
 
-Status: **first local CLI slice implemented**. Read-only local tmux listing works.
-Remote hosts, attachment, inventory loading, the TUI and VMs are not implemented.
-Nothing currently provisions or connects to remote hosts.
+Status: **read-only multi-machine CLI discovery**. Local and SSH tmux listing
+use a private machine inventory, bounded concurrency and per-host deadlines.
+Attachment, the TUI and VMs are not implemented. No remote installation or
+provisioning is performed.
 
-## Try the first slice
+## Try the CLI
 
 ```sh
 cd argos
@@ -20,11 +21,12 @@ cargo run --quiet --locked -- list
 cargo run --quiet --locked -- list --json
 ```
 
-`list` uses your local default tmux server, including the current server when run
-inside tmux. Use `list --socket /absolute/path --json` for a specific socket.
-Discovery does not create a server or change sessions. No inventory is required.
+`list` reads your machine inventory when present, otherwise it lists only the local
+default tmux server. Use `list --local` to explicitly stay local, or
+`list --socket /absolute/path --json` for a specific local socket. These local modes
+bypass implicit inventory loading. Discovery does not create servers or change sessions.
 
-JSON schema version 1 includes `observed_at_unix_ms` and one local host with
+JSON schema version 1 includes `observed_at_unix_ms` and a deterministic list of hosts with
 `id` (hostname), `status`, `sessions`, and `error`. Sessions have `id`, exact `name`,
 `windows`, and `attached_clients`. Session IDs are scoped to a server lifetime,
 not globally persistent task IDs. Human output escapes special characters.
@@ -39,7 +41,7 @@ nix build                       # result/bin/argos
 nix run . -- list                # no dev shell needed
 ```
 
-The release package includes tmux on its runtime PATH. Rust/Cargo are only build
+The release package includes tmux and OpenSSH on its runtime PATH. Rust/Cargo are only build
 and development dependencies. To use the published package without installation:
 
 ```sh
@@ -74,20 +76,65 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked
 python3 tests/local_tmux.py
+python3 tests/config_cli.py
+python3 tests/remote_ssh.py
 ```
 
 The integration test uses a disposable real tmux server on a unique socket and
 only cleans up that server. It never kills or modifies your existing sessions.
+The SSH test uses a real rootless loopback sshd and real tmux with disposable keys
+and trust files. A temporary PATH adapter supplies the test SSH configuration to
+the real SSH executable. It does not fake responses or modify user SSH settings.
+Run that test with the unwrapped debug binary, not the Nix-wrapped executable.
 The dev shell and Rust dependencies are pinned in `flake.lock` and `Cargo.lock`.
 
-## Local configuration (planned)
+## Private machine inventory
 
-Machine-specific inventory belongs in `$XDG_CONFIG_HOME/argos/config.toml`,
-defaulting to `~/.config/argos/config.toml`, outside this repository.
-`examples/config.toml` is a generic proposed schema, not an active configuration.
-**The current CLI does not load this file yet.** Host aliases, project paths and
-machine defaults will remain local when multi-machine discovery is implemented.
-Credentials should stay in existing SSH/keychain tooling, not in this inventory.
+Copy `examples/config.toml` to `$XDG_CONFIG_HOME/argos/config.toml` (default
+`~/.config/argos/config.toml`) and customize it. Keep this file outside the public
+repository. All names in the example are fictional.
+
+```toml
+schema_version = 1
+
+[client]
+machine_id = "workstation"
+connect_timeout_seconds = 3
+max_parallel_probes = 4
+
+[machines.workstation]
+
+[machines.server]
+ssh_alias = "server"
+```
+
+The client ID must name a machine in the inventory. That entry is queried locally.
+Other entries require an existing SSH alias or hostname, optionally `user@host`.
+Each entry can set `socket = "/path/to/tmux.sock"` on its own machine. The timeout
+is a total per-host discovery deadline, not just a connection timeout. Parallelism
+is limited by `max_parallel_probes`. Unknown fields and unsupported schema versions
+are rejected rather than silently ignored. The future VM/project schema is separately
+proposed in `examples/environment-proposal.toml` and is not accepted by this loader.
+
+```sh
+argos list                             # all configured hosts
+argos list --json                       # successes plus structured per-host errors
+argos list --host server                # one configured host
+argos list --config /path/inventory.toml
+argos list --local                      # no remote connections
+```
+
+`--host` requires an inventory. `--socket` is local-only and cannot be combined
+with `--config` or `--host`. Missing default inventory falls back to local listing,
+but a missing explicitly selected file is an error. Configuration errors exit 2.
+A failed host does not hide healthy hosts: JSON retains every requested host and
+exits 1 if any failed. Successful empty results exit 0.
+
+SSH uses existing user SSH configuration and keys, requires known host keys, and
+never prompts for passwords or accepts unknown keys. Forwarding is disabled for
+probes. Run your usual `ssh <alias>` separately to establish trust/authentication
+when needed. An unavailable agent, rejected key, offline host or missing remote
+tmux is reported explicitly. No credentials belong in this inventory.
 
 ## The workflow
 
@@ -150,7 +197,7 @@ argos env inspect <machine/environment>
 argos env destroy <machine/environment>  # explicit destructive confirmation
 ```
 
-Only local `list`, `list --json`, and help are implemented today. Other commands
+Only read-only local/SSH `list`, `list --json`, filtering, and help are implemented today. Other commands
 are proposed, not installed commands. `start` will boot a stopped VM.
 It does **not** restore process memory. Detach/switch to keep agents and backends
 running; stopping a VM ends its processes while retaining its disk.

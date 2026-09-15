@@ -77,7 +77,7 @@ def main():
             assert failed["error"]["code"] == "tmux_not_found"
 
         try:
-            names = ["quotes ' \" ; $(literal) trailing ", "unicode α and \"quoted\""]
+            names = ["quotes ' \" ; $(literal) trailing ", "unicode α | and \"quoted\""]
             ids = [tmux("new-session", "-d", "-P", "-F", "#{session_id}",
                         "-s", name, "sleep 300").strip() for name in names]
             tmux("new-window", "-d", "-t", ids[0], "sleep 300")

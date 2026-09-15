@@ -30,12 +30,38 @@ Local validation:
   native tmux: IDs, exact names, windows and attached-client counts. No existing
   sessions, settings or host configuration were changed.
 
-Current limits: local subprocess queries are sequential and do not yet have deadlines,
-so a wedged tmux server can stall discovery. Deadlines and partial-host behavior belong
-to the next discovery slice. The snapshot is not atomic across concurrent session
-changes. A Nix release package is available via `nix build`/`nix run`. Generic
-Home Manager installation instructions are in README. System activation is
-user-controlled.
+### Slice 2: private inventory and remote discovery
+
+Implemented: strict schema-versioned private TOML inventory, `--config`, `--host`,
+`--local`, concurrent per-host probes, one native tmux query per host, total
+per-host deadlines, output caps, and structured partial results. The Nix package
+includes both tmux and OpenSSH. Examples separate active machine inventory from
+the proposed VM/project schema.
+
+Validation:
+
+- Real CLI configuration checks cover implicit/explicit loading, missing files,
+  schema/field/alias/limit rejection, host selection and local-only bypass.
+- A real isolated loopback sshd and tmux test covers exact session data with Unicode,
+  quotes, metacharacters and pipes, quoted socket paths, unchanged pane PIDs,
+  local/remote agreement, filtering, host-key failures, authentication failures,
+  refused connections and healthy partial results. It uses disposable keys and
+  trust files and a PATH adapter that executes real SSH with a test config.
+- Read-only discovery against existing personal tailnet hosts was attempted, but
+  SSH authentication was rejected. No credentials, authorized keys or trust files
+  were changed. Successful discovery on two physical machines remains an acceptance
+  blocker, not a completed check. Hostnames and captured session data are not public.
+
+Current limits: no attach/TUI/VM support. Discovery is a current snapshot, not a
+cache or live event stream. Remote login shells must support the fixed POSIX shell
+probe. A timed-out local SSH process is killed and reaped, but custom ProxyCommand
+subprocesses that outlive it are not guaranteed to be terminated in this slice.
+Reader threads never delay return past the deadline. Proxy cleanup needs a dedicated
+process-group follow-up before claiming arbitrary proxy-lifecycle coverage.
+
+M0a remains in progress. The next acceptance step is successful ordinary-key or
+agent-based SSH discovery on two real machines, then interactive attachment.
+NixOS activation remains user-controlled.
 
 
 Release boundaries: **M0a (CLI) is the first usable release** without VM/browser
