@@ -96,7 +96,7 @@ def main():
             for arguments, code in [([], 2), (["missing", "--socket", str(sock)], 1),
                                     (["source", "--socket", str(sock)], 1),
                                     ([source, "--socket", str(sock), "--json"], 2),
-                                    ([source, "--config", str(config), "--host", "remote"], 2),
+                                    ([source, "--config", str(config), "--host", "remote"], 1),
                                     ([source, "--socket", str(sock)], 1)]:
                 r = run(*prefix, *arguments)
                 assert r.returncode == code, (arguments, r.returncode, r.stdout, r.stderr)

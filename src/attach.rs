@@ -14,6 +14,19 @@ struct TmuxEnv {
     pane: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct AttachTarget {
+    id: String,
+    socket: Option<String>,
+    ssh_alias: Option<String>,
+}
+
+impl AttachTarget {
+    fn is_remote(&self) -> bool {
+        self.ssh_alias.is_some()
+    }
+}
+
 fn parse_tmux_env(value: &str, pane_value: Option<&str>) -> Result<TmuxEnv, String> {
     let mut parts = value.rsplitn(3, ',');
     let client = parts.next().ok_or("TMUX is malformed")?;
@@ -52,10 +65,10 @@ pub(crate) fn run(
     host: Option<String>,
     local: bool,
 ) -> ExitCode {
-    let mut chosen = match resolve_socket(socket, config_path, host, local) {
-        Ok(socket) => socket,
-        Err(e) => {
-            eprintln!("error: {e}");
+    let mut target = match resolve_target(socket, config_path, host, local) {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("error: {error}");
             return ExitCode::from(2);
         }
     };
@@ -79,37 +92,95 @@ pub(crate) fn run(
             return ExitCode::from(1);
         }
     };
-    if let Some(env) = &inside {
-        if !same_socket(&env.socket, chosen.as_deref()) {
+
+    if let Some(env) = &inside
+        && !target.is_remote()
+    {
+        if !same_socket(&env.socket, target.socket.as_deref()) {
             eprintln!("error: refusing to nest across different tmux servers");
             return ExitCode::from(1);
         }
-        // Use the parsed socket explicitly, including paths containing commas.
-        chosen = Some(env.socket.clone());
+        target.socket = Some(env.socket.clone());
     }
-    let sessions = match tmux::discover(chosen.as_deref(), None, Duration::from_secs(3)) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: {}: {}", e.code, e.message);
+
+    let sessions = match tmux::discover(
+        target.socket.as_deref(),
+        target.ssh_alias.as_deref(),
+        Duration::from_secs(3),
+    ) {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            eprintln!("error: {}: {}", error.code, error.message);
             return ExitCode::from(1);
         }
     };
-    let target = match select(&sessions, session) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: {e}");
+    let selected = match select(&sessions, session) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("error: {error}");
             return ExitCode::from(1);
         }
     };
-    if let Some(env) = &inside {
-        return switch_inside(env, &target.id);
+
+    match (inside.as_ref(), target.ssh_alias.as_deref()) {
+        (Some(env), None) => switch_inside(env, &selected.id),
+        (None, None) => exec_local_tmux(target.socket.as_deref(), &selected.id),
+        (Some(env), Some(alias)) => {
+            open_remote_window(env, &target.id, alias, target.socket.as_deref(), selected)
+        }
+        (None, Some(alias)) => exec_remote_ssh(alias, target.socket.as_deref(), &selected.id),
     }
+}
+
+fn resolve_target(
+    socket: Option<String>,
+    config_path: Option<PathBuf>,
+    host: Option<String>,
+    local: bool,
+) -> Result<AttachTarget, String> {
+    if local || socket.is_some() {
+        return Ok(AttachTarget {
+            id: "local".into(),
+            socket,
+            ssh_alias: None,
+        });
+    }
+    let loaded = match config_path {
+        Some(p) => config::load(&p).map(Some),
+        None => config::default_path().map_or(Ok(None), |p| config::load_implicit(&p)),
+    }?;
+    let cfg = match loaded {
+        Some(c) => c,
+        None => {
+            if host.is_some() {
+                return Err("--host requires a configured inventory".into());
+            }
+            return Ok(AttachTarget {
+                id: "local".into(),
+                socket: None,
+                ssh_alias: None,
+            });
+        }
+    };
+    let id = host.as_deref().unwrap_or(&cfg.client.machine_id);
+    let machine = cfg
+        .machines
+        .get(id)
+        .ok_or_else(|| format!("unknown host id: {id}"))?;
+    Ok(AttachTarget {
+        id: id.into(),
+        socket: machine.socket.clone(),
+        ssh_alias: machine.ssh_alias.clone(),
+    })
+}
+
+fn exec_local_tmux(socket: Option<&str>, target: &str) -> ExitCode {
     let mut command = Command::new("tmux");
     command.args(["-u", "-N"]);
-    if let Some(path) = chosen {
-        command.args(["-S", &path]);
+    if let Some(path) = socket {
+        command.args(["-S", path]);
     }
-    command.args(["attach-session", "-t", &target.id]);
+    command.args(["attach-session", "-t", target]);
     #[cfg(unix)]
     {
         let error = command.exec();
@@ -123,37 +194,130 @@ pub(crate) fn run(
     }
 }
 
-fn resolve_socket(
-    socket: Option<String>,
-    config_path: Option<PathBuf>,
-    host: Option<String>,
-    local: bool,
-) -> Result<Option<String>, String> {
-    if local || socket.is_some() {
-        return Ok(socket);
+fn exec_remote_ssh(alias: &str, socket: Option<&str>, target: &str) -> ExitCode {
+    let mut command = remote_ssh_command(alias, socket, target, true);
+    #[cfg(unix)]
+    {
+        let error = command.exec();
+        eprintln!("error: cannot execute ssh: {error}");
+        ExitCode::from(1)
     }
-    let loaded = match config_path {
-        Some(p) => config::load(&p).map(Some),
-        None => config::default_path().map_or(Ok(None), |p| config::load_implicit(&p)),
-    }?;
-    let cfg = match loaded {
-        Some(c) => c,
-        None => {
-            if host.is_some() {
-                return Err("--host requires a configured inventory".into());
+    #[cfg(not(unix))]
+    {
+        match command.status() {
+            Ok(status) if status.success() => ExitCode::SUCCESS,
+            Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
+            Err(error) => {
+                eprintln!("error: cannot execute ssh: {error}");
+                ExitCode::from(1)
             }
-            return Ok(None);
         }
-    };
-    let id = host.as_deref().unwrap_or(&cfg.client.machine_id);
-    let machine = cfg
-        .machines
-        .get(id)
-        .ok_or_else(|| format!("unknown host id: {id}"))?;
-    if machine.ssh_alias.is_some() {
-        return Err("remote attachment is not implemented yet".into());
     }
-    Ok(machine.socket.clone())
+}
+
+fn open_remote_window(
+    env: &TmuxEnv,
+    host_id: &str,
+    alias: &str,
+    socket: Option<&str>,
+    target: &tmux::Session,
+) -> ExitCode {
+    let label = format!("argos:{host_id}:{}", target.name);
+    let mut tmux = Command::new("tmux");
+    tmux.args([
+        "-u",
+        "-N",
+        "-S",
+        &env.socket,
+        "new-window",
+        "-n",
+        &label,
+        &remote_ssh_shell_command(alias, socket, &target.id),
+    ]);
+    match tmux::process::run(tmux, Instant::now() + Duration::from_secs(3)) {
+        Ok(output) if output.status.success() => ExitCode::SUCCESS,
+        Ok(output) => {
+            eprintln!(
+                "error: tmux new-window failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            ExitCode::from(1)
+        }
+        Err(_) => {
+            eprintln!("error: tmux new-window timed out");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn remote_ssh_command(alias: &str, socket: Option<&str>, target: &str, force_tty: bool) -> Command {
+    let mut command = Command::new("ssh");
+    if force_tty {
+        command.arg("-tt");
+    }
+    command.env("LC_ALL", "C").args([
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "ForwardAgent=no",
+        "-o",
+        "PermitLocalCommand=no",
+        alias,
+        &remote_attach_script(socket, target),
+    ]);
+    command
+}
+
+fn remote_ssh_shell_command(alias: &str, socket: Option<&str>, target: &str) -> String {
+    let mut parts = vec!["exec".into(), "ssh".into(), "-tt".into()];
+    for arg in [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "ForwardAgent=no",
+        "-o",
+        "PermitLocalCommand=no",
+        alias,
+        &remote_attach_script(socket, target),
+    ] {
+        parts.push(shell_quote(arg));
+    }
+    parts.join(" ")
+}
+
+fn remote_attach_script(socket: Option<&str>, target: &str) -> String {
+    let mut args = vec!["-u".to_string(), "-N".to_string()];
+    if let Some(path) = socket {
+        args.push("-S".into());
+        args.push(path.into());
+    }
+    args.extend(["attach-session".into(), "-t".into(), target.into()]);
+    let tmux = args
+        .iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if let Some(path) = socket {
+        format!(
+            "if [ -e {} ] && [ ! -S {} ]; then echo 'argos: invalid_socket' >&2; exit 125; fi; LC_ALL=C exec tmux {tmux}",
+            shell_quote(path),
+            shell_quote(path)
+        )
+    } else {
+        format!("LC_ALL=C exec tmux {tmux}")
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn same_socket(a: &str, b: Option<&str>) -> bool {
@@ -250,15 +414,20 @@ fn switch_inside(env: &TmuxEnv, target: &str) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn env_parsing_allows_commas() {
         let e = parse_tmux_env("/tmp/a,b,12,7", Some("%3")).unwrap();
         assert_eq!(e.socket, "/tmp/a,b");
+        assert_eq!(e.pid, 12);
     }
+
     #[test]
     fn env_rejects_bad_pane() {
-        assert!(parse_tmux_env("/tmp/a,1,2,%x", None).is_err());
+        assert!(parse_tmux_env("/tmp/a,1,2", None).is_err());
+        assert!(parse_tmux_env("/tmp/a,1,2", Some("x")).is_err());
     }
+
     #[test]
     fn refuses_id_name_ambiguity() {
         let sessions = vec![
@@ -277,6 +446,7 @@ mod tests {
         ];
         assert!(select(&sessions, "$1").is_err());
     }
+
     #[test]
     fn exact_match_only() {
         let s = vec![tmux::Session {
@@ -287,5 +457,13 @@ mod tests {
         }];
         assert!(select(&s, "wo").is_err());
         assert_eq!(select(&s, "work").unwrap().id, "$1");
+    }
+
+    #[test]
+    fn remote_script_quotes_exact_target() {
+        let script = remote_attach_script(Some("/tmp/a b'sock"), "$12");
+        assert!(script.contains("'/tmp/a b'\\''sock'"));
+        assert!(script.contains("'$12'"));
+        assert!(script.contains("exec tmux"));
     }
 }

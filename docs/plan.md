@@ -69,7 +69,7 @@ NixOS activation remains user-controlled.
 Implemented interface: `argos attach SESSION` with explicit config/host selection,
 local-only bypass and socket selection. This increment is developed/tested directly
 from `target/debug/argos` without updating the installed NixOS package pin.
-Remote attachment is still deferred.
+Remote attachment for configured SSH hosts is now implemented.
 
 Verified: 15 Rust tests, fmt, Clippy, existing local/config/real-SSH integration
 checks, and `tests/attach_tmux.py` against both debug and Nix-packaged executables
@@ -89,8 +89,12 @@ Behavior and acceptance boundaries:
   switching, exact unusual names, other-client preservation, ambiguous/cross-server
   refusal, terminal resize, native prefix detach, terminal-mode restoration,
   unchanged pane PIDs and an advancing backend counter after detachment.
-- These checks do not establish remote attach, OSC 52 clipboard interoperability,
-  the TUI, or successful attachment from two physical tailnet machines.
+- `tests/remote_attach.py` uses real loopback sshd, SSH and tmux to exercise
+  plain-terminal remote attach plus a local tmux connection window. It verifies
+  exact target IDs/names, detach behavior, terminal restoration and unchanged panes.
+- These checks do not establish OSC 52 clipboard interoperability, the TUI, or
+  remote attach from two physical tailnet machines. Test a real configured host
+  manually from an interactive terminal before pinning the installed package.
 
 Release boundaries: **M0a (CLI) is the first usable release** without VM/browser
 features. **M0b adds the full-screen TUI over CLI JSON output.**

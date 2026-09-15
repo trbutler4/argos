@@ -18,7 +18,7 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postInstall = ''
               wrapProgram $out/bin/argos \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.tmux pkgs.openssh ]}
+                --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.tmux pkgs.openssh ]}
             '';
             meta = {
               description = "Personal command center for tmux work";

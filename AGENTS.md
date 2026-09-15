@@ -7,8 +7,9 @@ Read README.md, docs/architecture.md and docs/plan.md before implementation.
 
 The Rust CLI implements read-only local/SSH `list`, JSON output, strict private
 TOML inventory, host filtering and deadlines. `--local`/`--socket` bypass implicit
-inventory. Local `attach` supports exact session targeting and safe same-server
-client switching. Remote attachment, TUI and VM runner are not implemented. `examples/config.toml` is active
+inventory. `attach` supports exact local/SSH session targeting, safe same-server client
+switching, and remote connection windows from inside local tmux. The TUI and VM
+runner are not implemented. `examples/config.toml` is active
 inventory schema, while `examples/environment-proposal.toml` is a future proposal.
 Do not mark implementation milestones complete from documentation checks.
 
@@ -45,7 +46,7 @@ Do not mark implementation milestones complete from documentation checks.
   `cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`,
   `cargo build --locked`, `python3 tests/local_tmux.py`, and
   `python3 tests/config_cli.py`, `python3 tests/remote_ssh.py`, and
-  `python3 tests/attach_tmux.py`.
+  `python3 tests/attach_tmux.py`, and `python3 tests/remote_attach.py`.
 
 ## Public repository boundary
 
