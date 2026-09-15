@@ -1,0 +1,52 @@
+# cmd-center contributor guidance
+
+This is a personal tool for one user's NixOS + Tailscale + tmux workflow.
+Read README.md, docs/architecture.md and docs/plan.md before implementation.
+
+## Current phase
+
+The first Rust CLI slice implements read-only local `list` and `list --json`,
+with optional `--socket PATH`. No config loader, SSH, attach, TUI, VM runner or
+Nix module exists yet. Example TOML and other commands remain proposals.
+Do not mark implementation milestones complete from documentation checks.
+
+## Keep the design focused
+
+- Reuse SSH, tmux, NixOS/systemd and devenv. Do not replace their core functions.
+- Support existing host tmux sessions before requiring managed VMs.
+- Each task VM stays on its home machine and has a separate clone and persistent data.
+- No live migration, automatic synchronization, public ingress, multi-tenant control
+  plane or general distribution-packaging effort.
+- Build the Rust CLI first (M0a), then a full-screen Rust TUI (M0b) consuming CLI
+  JSON output. The CLI is the canonical operational interface, not just a diagnostic
+  companion. The TUI framework remains open.
+  Prefer straightforward idiomatic Rust, explain important ownership/concurrency
+  tradeoffs briefly, and avoid unnecessary generics, unsafe code or performance tuning.
+  Never parse human-readable CLI tables in the TUI or duplicate SSH/tmux/lifecycle
+  logic there. Interactive attach uses real terminal handoff, not JSON output.
+- Project/host names in mockups are illustrative. Do not silently pick `example-app` or
+  connect to/provision hosts merely because they appear in an example.
+
+## Safety and validation
+
+- Reading inventory is not consent to mutate hosts or kill sessions.
+- Preserve host-key verification and existing tmux bindings.
+- Never mount the whole host home or forward an SSH agent into task guests by default.
+- Secrets must not enter source control or Nix store paths.
+- Stop keeps persistent data. Destroy is a separate explicitly confirmed operation.
+- Protect unrelated local/remote sessions and use disposable test data.
+- Test through real SSH, tmux, systemd and browser interfaces as milestones mature.
+  Synthetic tests alone do not prove persistence, PTY handling or full-stack readiness.
+- Keep provisional decisions and external blockers explicit. Update scope if findings
+  invalidate a VM backend or lifecycle assumption rather than hiding it behind an abstraction.
+- Commit focused changes. Enter `nix develop`, then run `cargo fmt --check`,
+  `cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`,
+  `cargo build --locked`, and `python3 tests/local_tmux.py`.
+
+## Public repository boundary
+
+- Keep machine-specific inventory outside this repository, at
+  `$XDG_CONFIG_HOME/cmd-center/config.toml` (default `~/.config/cmd-center/config.toml`).
+  The loader is planned, not implemented. Commit only generic examples.
+- Do not commit local hostnames, usernames, project paths, private endpoints,
+  credentials, captured session listings, or personal Git author email addresses.

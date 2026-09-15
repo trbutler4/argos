@@ -1,0 +1,13 @@
+/target/
+/.direnv/
+/result
+/result-*
+
+.envrc
+
+.env
+.env.*
+!.env.example
+
+/config.local.toml
+/config.*.local.toml
