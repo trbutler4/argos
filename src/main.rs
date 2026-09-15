@@ -6,6 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+mod attach;
 mod config;
 mod tmux;
 
@@ -21,6 +22,18 @@ enum Command {
     List {
         #[arg(long)]
         json: bool,
+        #[arg(long, value_name="PATH", conflicts_with_all=["config", "host", "local"])]
+        socket: Option<String>,
+        #[arg(long, value_name="PATH", conflicts_with_all=["socket", "local"])]
+        config: Option<std::path::PathBuf>,
+        #[arg(long, value_name="ID", conflicts_with_all=["socket", "local"])]
+        host: Option<String>,
+        #[arg(long, conflicts_with_all=["socket", "config", "host"])]
+        local: bool,
+    },
+    /// Attach to an exact tmux session name or ID.
+    Attach {
+        session: String,
         #[arg(long, value_name="PATH", conflicts_with_all=["config", "host", "local"])]
         socket: Option<String>,
         #[arg(long, value_name="PATH", conflicts_with_all=["socket", "local"])]
@@ -66,6 +79,13 @@ fn main() -> ExitCode {
             host,
             local,
         } => run_list(json, socket, config, host, local),
+        Command::Attach {
+            session,
+            socket,
+            config,
+            host,
+            local,
+        } => attach::run(&session, socket, config, host, local),
     }
 }
 

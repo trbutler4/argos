@@ -9,8 +9,8 @@ separate Git clone, toolchain, backend processes, and database state.
 
 Status: **read-only multi-machine CLI discovery**. Local and SSH tmux listing
 use a private machine inventory, bounded concurrency and per-host deadlines.
-Attachment, the TUI and VMs are not implemented. No remote installation or
-provisioning is performed.
+Local session attachment is available. Remote attachment, the TUI and VMs are
+not implemented. No remote installation or provisioning is performed.
 
 ## Try the CLI
 
@@ -33,6 +33,39 @@ not globally persistent task IDs. Human output escapes special characters.
 Exit codes: 0 for success (including no server/sessions), 1 for operational errors,
 and 2 for invalid arguments. Operational tmux failures include a structured JSON
 error, with diagnostics on stderr.
+
+### Attach to a local session
+
+```sh
+argos attach 'session name'
+argos attach '$4' --config /path/inventory.toml
+```
+
+Targets are exact session names or IDs from `list --json`, never prefixes or patterns.
+Quote IDs so the shell does not expand `$`. Attachment selects the configured client
+machine by default, not every machine in the inventory. `--host` can explicitly
+select that local machine. Remote hosts are rejected in this first attach slice.
+`--config`, `--local` and `--socket` use the same config-selection conventions as `list`.
+
+- From a plain terminal, Argos hands the terminal to native tmux. Detach using your
+  existing tmux prefix followed by `d`. Shells and backends keep running.
+- Inside the same tmux server, Argos switches the invoking session's sole attached
+  client instead of nesting tmux. It does not detach other clients on the target.
+- If multiple clients are attached to the invoking session, Argos refuses to guess
+  which terminal to switch. Cross-server nesting is also refused in this slice.
+- Attachment is interactive, not JSON output. It requires a real TTY in either mode.
+
+For development, build and run directly without a NixOS rebuild:
+
+```sh
+nix develop --command cargo build --locked
+./target/debug/argos list --config ./config.local.toml
+./target/debug/argos attach 'session name' --config ./config.local.toml
+```
+
+`config.local.toml` is gitignored and directly editable. Pass it explicitly to keep
+development independent of the installed config. Building this binary does not
+update your installed version or NixOS input pin.
 
 ### Nix package and installation
 
@@ -78,6 +111,7 @@ cargo build --locked
 python3 tests/local_tmux.py
 python3 tests/config_cli.py
 python3 tests/remote_ssh.py
+python3 tests/attach_tmux.py
 ```
 
 The integration test uses a disposable real tmux server on a unique socket and
@@ -197,7 +231,7 @@ argos env inspect <machine/environment>
 argos env destroy <machine/environment>  # explicit destructive confirmation
 ```
 
-Only read-only local/SSH `list`, `list --json`, filtering, and help are implemented today. Other commands
+Local/SSH `list`, JSON output, filtering, local `attach`, and help are implemented today. Other commands
 are proposed, not installed commands. `start` will boot a stopped VM.
 It does **not** restore process memory. Detach/switch to keep agents and backends
 running; stopping a VM ends its processes while retaining its disk.

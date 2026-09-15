@@ -11,3 +11,7 @@
 
 /config.local.toml
 /config.*.local.toml
+
+# Python test caches
+__pycache__/
+*.pyc

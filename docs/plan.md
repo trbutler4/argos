@@ -52,17 +52,45 @@ Validation:
   were changed. Successful discovery on two physical machines remains an acceptance
   blocker, not a completed check. Hostnames and captured session data are not public.
 
-Current limits: no attach/TUI/VM support. Discovery is a current snapshot, not a
+Discovery limits: no cached or live-streamed state. Discovery is a current snapshot, not a
 cache or live event stream. Remote login shells must support the fixed POSIX shell
 probe. A timed-out local SSH process is killed and reaped, but custom ProxyCommand
 subprocesses that outlive it are not guaranteed to be terminated in this slice.
 Reader threads never delay return past the deadline. Proxy cleanup needs a dedicated
 process-group follow-up before claiming arbitrary proxy-lifecycle coverage.
 
-M0a remains in progress. The next acceptance step is successful ordinary-key or
-agent-based SSH discovery on two real machines, then interactive attachment.
+M0a remains in progress. Remote acceptance still requires successful ordinary-key or
+agent-based SSH discovery on two real machines, then remote interactive attachment.
 NixOS activation remains user-controlled.
 
+
+### Slice 3: local attachment
+
+Implemented interface: `argos attach SESSION` with explicit config/host selection,
+local-only bypass and socket selection. This increment is developed/tested directly
+from `target/debug/argos` without updating the installed NixOS package pin.
+Remote attachment is still deferred.
+
+Verified: 15 Rust tests, fmt, Clippy, existing local/config/real-SSH integration
+checks, and `tests/attach_tmux.py` against both debug and Nix-packaged executables
+all passed. The PTY test initially exposed incorrect native TMUX parsing and
+implicit routing for comma-containing socket paths. Parsing the actual three-part
+environment and explicitly selecting its socket fixed both, with passing reruns.
+No existing user clients were switched during testing.
+
+Behavior and acceptance boundaries:
+
+- Resolve exact session names or IDs, reject missing/ambiguous targets and remote hosts.
+- Plain terminals execute native tmux attachment without detaching existing clients.
+- Inside the same server, switch only the invoking session's sole attached client.
+  Multiple clients on that session are ambiguous and are refused. Cross-server nesting
+  and noninteractive attachment are refused rather than guessing.
+- Real disposable tmux/PTY tests exercise plain-terminal attachment, same-server
+  switching, exact unusual names, other-client preservation, ambiguous/cross-server
+  refusal, terminal resize, native prefix detach, terminal-mode restoration,
+  unchanged pane PIDs and an advancing backend counter after detachment.
+- These checks do not establish remote attach, OSC 52 clipboard interoperability,
+  the TUI, or successful attachment from two physical tailnet machines.
 
 Release boundaries: **M0a (CLI) is the first usable release** without VM/browser
 features. **M0b adds the full-screen TUI over CLI JSON output.**

@@ -1,5 +1,5 @@
 #[path = "process.rs"]
-mod process;
+pub(crate) mod process;
 
 use serde::Serialize;
 #[cfg(unix)]
