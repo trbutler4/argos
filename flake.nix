@@ -2,10 +2,15 @@
   description = "Personal argos CLI and development tools";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/dc5d91f840324650bac8c379428c7037a416959a";
+  inputs.microvm = {
+    url = "github:microvm-nix/microvm.nix";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
 
-  outputs = { self, nixpkgs, ... }:
+  outputs = { self, nixpkgs, microvm, ... }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
+      microvmSystem = "x86_64-linux";
     in {
       packages = nixpkgs.lib.genAttrs systems (system:
         let pkgs = import nixpkgs { inherit system; };
@@ -27,6 +32,8 @@
             };
           };
           default = argos;
+        } // nixpkgs.lib.optionalAttrs (system == microvmSystem) {
+          argos-microvm-prototype = self.nixosConfigurations.argos-microvm-prototype.config.microvm.declaredRunner;
         });
 
       apps = nixpkgs.lib.genAttrs systems (system: {
@@ -53,5 +60,13 @@
             ];
           };
         });
+
+      nixosConfigurations.argos-microvm-prototype = nixpkgs.lib.nixosSystem {
+        system = microvmSystem;
+        modules = [
+          microvm.nixosModules.microvm
+          ./nix/microvm/prototype.nix
+        ];
+      };
     };
 }

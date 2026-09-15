@@ -116,6 +116,25 @@ Boundaries: this is not the full M0b milestone yet. Search/filter, selected-sess
 details, resize-specific assertions, and return-to-dashboard after attach remain
 future work.
 
+### Slice 5: microvm.nix runner-package spike
+
+Implemented interface: a flake-level `.#argos-microvm-prototype` runner package
+for `x86_64-linux`, backed by `nix/microvm/prototype.nix`. It uses microvm.nix
+with QEMU, a 9p read-only `/nix/store` share, and a small `/var` image created in
+the runner's working directory. The VM includes `git` and `tmux`, locks the root
+password, and emits `ARGOS_MICROVM_READY` on the console for boot validation.
+
+Verified: `/dev/kvm` exists and the current user is in `kvm`; `nix build
+.#argos-microvm-prototype` succeeded; the runner booted from a scratch directory
+without a host NixOS rebuild, sudo, TAP/bridge setup, or repo-local runtime state;
+readiness appeared on the console after about 15 to 16 seconds. No QEMU process was
+left running after the test harness terminated it.
+
+Boundaries: this proves only build and boot of a minimal MicroVM. It does not yet
+prove SSH into the guest, guest host-key identity, forwarded ports, separate clone
+state, `devenv up`, reboot persistence, or browser access. Those belong to the
+next slice before any `env create/start/status/attach` command is added.
+
 Release boundaries: **M0a (CLI) is the first usable release** without VM/browser
 features. **M0b adds the full-screen TUI over CLI JSON output.**
 **M2 is the initial complete managed-environment workflow**. M1 is its prerequisite
@@ -218,8 +237,10 @@ Work:
 
 1. Confirm the first project and host. `example-app` is a candidate only. Check host KVM,
    architecture, memory/disk headroom, repo authentication and project service needs.
+   Initial local KVM availability is confirmed on the current machine.
 2. Pin microvm.nix/NixOS/devenv versions and create a QEMU/KVM guest prototype.
-   Record any required one-time privileged host configuration before applying it.
+   The first runner-package prototype builds and boots without a host rebuild; SSH,
+   persistence and project tooling are still pending.
 3. Prove private guest connectivity through the host, guest host-key verification,
    and client loopback forwarding to services bound to guest loopback.
 4. Give each guest independent writable storage for clone, project state, Nix store

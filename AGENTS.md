@@ -7,10 +7,11 @@ Read README.md, docs/architecture.md and docs/plan.md before implementation.
 
 The Rust CLI implements local/SSH `list`, JSON output, strict private TOML
 inventory, host filtering, deadlines, local/SSH `attach`, and a simple `tui`
-session browser with Enter-to-attach handoff. `--local`/`--socket` bypass implicit
-inventory. `attach` supports exact local/SSH session targeting, safe same-server
-client switching, and remote connection windows from inside local tmux. The VM
-runner is not implemented. `examples/config.toml` is active
+session browser with Enter-to-attach handoff. A first microvm.nix QEMU runner-package
+prototype builds and boots, but VM SSH, project setup and `env` commands are not
+implemented. `--local`/`--socket` bypass implicit inventory. `attach` supports
+exact local/SSH session targeting, safe same-server client switching, and remote
+connection windows from inside local tmux. `examples/config.toml` is active
 inventory schema, while `examples/environment-proposal.toml` is a future proposal.
 Do not mark implementation milestones complete from documentation checks.
 
@@ -39,7 +40,8 @@ Do not mark implementation milestones complete from documentation checks.
 - Secrets must not enter source control or Nix store paths.
 - Stop keeps persistent data. Destroy is a separate explicitly confirmed operation.
 - Protect unrelated local/remote sessions and use disposable test data.
-- Test through real SSH, tmux, systemd and browser interfaces as milestones mature.
+- Test through real SSH, tmux, microvm/QEMU, systemd and browser interfaces as
+  milestones mature.
   Synthetic tests alone do not prove persistence, PTY handling or full-stack readiness.
 - Keep provisional decisions and external blockers explicit. Update scope if findings
   invalidate a VM backend or lifecycle assumption rather than hiding it behind an abstraction.

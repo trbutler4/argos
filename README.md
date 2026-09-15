@@ -10,8 +10,10 @@ separate Git clone, toolchain, backend processes, and database state.
 Status: **multi-machine CLI discovery with a simple TUI browser**. Local and SSH tmux listing
 use a private machine inventory, bounded concurrency and per-host deadlines.
 Local and SSH tmux attachment are available. The TUI provides session browsing,
-refresh, keyboard navigation, and Enter-to-attach terminal handoff. VMs are not
-implemented. No remote installation or provisioning is performed.
+refresh, keyboard navigation, and Enter-to-attach terminal handoff. A first
+microvm.nix QEMU prototype builds and boots, but VM SSH, project setup and
+environment management commands are not implemented. No remote installation or
+provisioning is performed.
 
 ## Try the CLI
 
@@ -86,6 +88,23 @@ nix develop --command cargo build --locked
 `config.local.toml` is gitignored and directly editable. Pass it explicitly to keep
 development independent of the installed config. Building this binary does not
 update your installed version or NixOS input pin.
+
+### MicroVM prototype
+
+A minimal microvm.nix/QEMU runner is available for backend exploration on
+`x86_64-linux`:
+
+```sh
+nix build .#argos-microvm-prototype
+mkdir -p .run/microvm-prototype
+cd .run/microvm-prototype
+../../result/bin/microvm-run
+```
+
+The runner creates its writable `var.img` and control socket in the current
+directory. It is intentionally console-only for now: no SSH keys, forwarded ports,
+project clone or devenv process manager are configured yet. See
+`docs/microvm-prototype.md` for the verified boot result and next slice.
 
 ### Nix package and installation
 
