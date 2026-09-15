@@ -115,6 +115,7 @@ def main():
 
         def terminal(args):
             master, slave = pty.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))
             original = termios.tcgetattr(slave)
             process = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True,
                                        preexec_fn=lambda: fcntl.ioctl(slave, termios.TIOCSCTTY, 0))
@@ -148,6 +149,19 @@ def main():
             wait(lambda: plain[0].poll() is not None, "plain remote attach did not detach")
             assert plain[0].returncode == 0
             assert termios.tcgetattr(plain[2]) == plain[3]
+            wait(lambda: not remote_clients(), "plain remote client did not detach")
+            assert before == tmux(remote_tmux, "list-panes", "-a", "-F", "#{pane_id}|#{pane_pid}")
+
+            # TUI Enter exits the alternate screen process and then hands the terminal to remote tmux.
+            tui_plain = terminal([str(BINARY), "tui", "--config", str(config), "--host", "remote"])
+            time.sleep(0.2)
+            os.write(tui_plain[1], b"\r")
+            wait(lambda: any(target_name in line for line in remote_clients()), "TUI did not attach remotely")
+            os.write(tui_plain[1], b"\x02d")
+            wait(lambda: tui_plain[0].poll() is not None, "TUI remote attach did not detach")
+            assert tui_plain[0].returncode == 0
+            assert termios.tcgetattr(tui_plain[2]) == tui_plain[3]
+            wait(lambda: not remote_clients(), "TUI remote client did not detach")
             assert before == tmux(remote_tmux, "list-panes", "-a", "-F", "#{pane_id}|#{pane_pid}")
 
             # Inside local tmux opens a connection window instead of replacing the current pane.
@@ -188,7 +202,7 @@ def main():
                     sshd.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     sshd.kill(); sshd.wait()
-    print("PASS: real SSH remote attach from plain terminal and local tmux connection window,")
+    print("PASS: real SSH remote attach from plain terminal, TUI, and local tmux connection window,")
     print("      exact target IDs/names, detach behavior, terminal restoration and unchanged panes.")
 
 

@@ -1,4 +1,4 @@
-use crate::{Host, Snapshot, SnapshotRequest, discover_snapshot, snapshot_request};
+use crate::{Host, Snapshot, SnapshotRequest, attach, discover_snapshot, snapshot_request};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
@@ -29,7 +29,18 @@ pub(crate) fn run(
         eprintln!("error: tui requires a terminal on stdin and stdout");
         return ExitCode::from(1);
     }
-    let request = match snapshot_request(socket, config, host, local) {
+    let args = TuiArgs {
+        socket,
+        config,
+        host,
+        local,
+    };
+    let request = match snapshot_request(
+        args.socket.clone(),
+        args.config.clone(),
+        args.host.clone(),
+        args.local,
+    ) {
         Ok(request) => request,
         Err((message, code)) => {
             eprintln!("error: {message}");
@@ -37,12 +48,40 @@ pub(crate) fn run(
         }
     };
     match run_terminal(App::new(request)) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(Some(selection)) => attach_selected(args, selection),
+        Ok(None) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: tui failed: {error}");
             ExitCode::from(1)
         }
     }
+}
+
+#[derive(Clone)]
+struct TuiArgs {
+    socket: Option<String>,
+    config: Option<PathBuf>,
+    host: Option<String>,
+    local: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingAttach {
+    host: String,
+    session_id: String,
+}
+
+fn attach_selected(args: TuiArgs, selection: PendingAttach) -> ExitCode {
+    if args.local || args.socket.is_some() {
+        return attach::run(&selection.session_id, args.socket, None, None, args.local);
+    }
+    attach::run(
+        &selection.session_id,
+        None,
+        args.config,
+        Some(args.host.unwrap_or(selection.host)),
+        false,
+    )
 }
 
 struct TerminalGuard {
@@ -69,19 +108,34 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn run_terminal(mut app: App) -> io::Result<()> {
+fn run_terminal(mut app: App) -> io::Result<Option<PendingAttach>> {
     let mut terminal = TerminalGuard::enter()?;
     app.refresh();
     loop {
         terminal.terminal.draw(|frame| app.render(frame))?;
         if event::poll(Duration::from_millis(250))?
             && let Event::Key(key) = event::read()?
-            && app.handle_key(key)
+            && let Some(action) = app.handle_key(key)
         {
-            break;
+            drop(terminal);
+            return Ok(action.attach_selection());
         }
     }
-    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Action {
+    Quit,
+    Attach(PendingAttach),
+}
+
+impl Action {
+    fn attach_selection(self) -> Option<PendingAttach> {
+        match self {
+            Self::Quit => None,
+            Self::Attach(selection) => Some(selection),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +172,14 @@ impl App {
         self.snapshot = discover_snapshot(&self.request);
         self.rows = rows(&self.snapshot);
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
+        if self
+            .rows
+            .get(self.selected)
+            .is_none_or(|row| row.session_id.is_none())
+            && let Some(index) = self.rows.iter().position(|row| row.session_id.is_some())
+        {
+            self.selected = index;
+        }
         let total_sessions: usize = self
             .snapshot
             .hosts
@@ -136,24 +198,35 @@ impl App {
         );
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => true,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
+            KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::Quit)
+            }
+            KeyCode::Enter => self.selected_attach().map(Action::Attach),
             KeyCode::Down | KeyCode::Char('j') => {
                 self.move_down();
-                false
+                None
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.move_up();
-                false
+                None
             }
             KeyCode::Char('r') => {
                 self.refresh();
-                false
+                None
             }
-            _ => false,
+            _ => None,
         }
+    }
+
+    fn selected_attach(&self) -> Option<PendingAttach> {
+        let row = self.rows.get(self.selected)?;
+        Some(PendingAttach {
+            host: row.host.clone(),
+            session_id: row.session_id.clone()?,
+        })
     }
 
     fn move_down(&mut self) {
@@ -215,7 +288,7 @@ impl App {
             })
             .unwrap_or_default();
         let footer = Paragraph::new(format!(
-            "{}{} | j/k or arrows move | r refresh | q quit | attach coming next",
+            "{}{} | Enter attach | j/k or arrows move | r refresh | q quit",
             self.last_status, selected
         ))
         .block(Block::default().borders(Borders::ALL));

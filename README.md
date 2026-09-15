@@ -7,10 +7,10 @@ TUI consuming its structured output**.
 regardless of which machine hosts it.** New tasks can get their own NixOS VM,
 separate Git clone, toolchain, backend processes, and database state.
 
-Status: **read-only multi-machine CLI discovery with first TUI browser**. Local and SSH tmux listing
+Status: **multi-machine CLI discovery with a simple TUI browser**. Local and SSH tmux listing
 use a private machine inventory, bounded concurrency and per-host deadlines.
-Local and SSH tmux attachment are available. The TUI currently provides a
-read-only session browser with refresh and keyboard navigation. VMs are not
+Local and SSH tmux attachment are available. The TUI provides session browsing,
+refresh, keyboard navigation, and Enter-to-attach terminal handoff. VMs are not
 implemented. No remote installation or provisioning is performed.
 
 ## Try the CLI
@@ -42,9 +42,11 @@ argos tui --config /path/inventory.toml
 argos tui --config ./config.local.toml
 ```
 
-The first TUI slice is read-only. It shows discovered hosts and sessions, supports
-`j`/`k` or arrow navigation, `r` to refresh, and `q` to quit. Attachment from the
-TUI is intentionally left for the next slice.
+The first TUI slice stays simple. It shows discovered hosts and sessions, supports
+`j`/`k` or arrow navigation, `r` to refresh, `q` to quit, and Enter to attach.
+When attaching, Argos exits the TUI first and hands the terminal to the existing
+`attach` path, so tmux/SSH owns the terminal rather than being nested inside the
+TUI process.
 
 ### Attach to a local session
 
@@ -76,6 +78,7 @@ For development, build and run directly without a NixOS rebuild:
 ```sh
 nix develop --command cargo build --locked
 ./target/debug/argos list --config ./config.local.toml
+./target/debug/argos tui --config ./config.local.toml
 ./target/debug/argos attach 'local-session' --config ./config.local.toml
 ./target/debug/argos attach 'remote-session' --config ./config.local.toml --host REMOTE_HOST
 ```

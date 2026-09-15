@@ -96,20 +96,24 @@ Behavior and acceptance boundaries:
   or complete M0b behavior. Test a real configured host manually from an interactive
   terminal before pinning the installed package.
 
-### Slice 4: first read-only TUI
+### Slice 4: first simple TUI with attach handoff
 
 Implemented interface: `argos tui` with the same config/host/local/socket selection
-as `list`. It renders a full-screen read-only session browser backed by the same
-snapshot discovery path as `list`, with `j`/`k` and arrow navigation, `r` refresh,
-and `q`/Esc/Ctrl-C quit. TUI attachment is intentionally deferred to the next slice.
+as `list`. It renders a full-screen session browser backed by the same snapshot
+discovery path as `list`, with `j`/`k` and arrow navigation, `r` refresh,
+`q`/Esc/Ctrl-C quit, and Enter to attach. Enter leaves raw/alternate-screen mode
+and reuses the existing `attach` path, so tmux/SSH owns the terminal rather than
+running inside the TUI process.
 
 Verified: 18 Rust tests, fmt, Clippy, full existing local/config/real-SSH/attach
 integration suite, `tests/tui.py` against a real PTY, and packaged Nix TUI smoke
 checks all passed. The TUI PTY test verifies visible rendered session content,
-navigation/refresh/quit input, non-TTY refusal, and terminal-mode restoration.
+navigation/refresh/quit input, non-TTY refusal, local attach handoff, alternate-screen
+exit before attach, detach, and terminal-mode restoration. `tests/remote_attach.py`
+now also verifies TUI remote attach through real loopback sshd/SSH/tmux.
 
 Boundaries: this is not the full M0b milestone yet. Search/filter, selected-session
-details, resize-specific assertions, and attach handoff/return-to-dashboard remain
+details, resize-specific assertions, and return-to-dashboard after attach remain
 future work.
 
 Release boundaries: **M0a (CLI) is the first usable release** without VM/browser
@@ -122,7 +126,7 @@ feasibility proof, and M3 is optional polish.
 ### M0a: CLI foundation (first usable release)
 
 **Deliverable:** Rust `list`, `attach`, and first `tui` commands that work across the real hosts.
-The first TUI browser is read-only; attach from the TUI belongs to M0b follow-up work.
+The first TUI browser stays simple and exits when handing the terminal to attach.
 
 1. Initialize the Cargo crate and a pinned Nix development shell for Rust/Cargo,
    rustfmt, Clippy and required CLI tools. Do not add a TUI framework yet.
