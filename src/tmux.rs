@@ -7,7 +7,7 @@ use std::os::unix::fs::FileTypeExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct Session {
     pub id: String,
     pub name: String,

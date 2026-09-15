@@ -7,10 +7,11 @@ TUI consuming its structured output**.
 regardless of which machine hosts it.** New tasks can get their own NixOS VM,
 separate Git clone, toolchain, backend processes, and database state.
 
-Status: **read-only multi-machine CLI discovery**. Local and SSH tmux listing
+Status: **read-only multi-machine CLI discovery with first TUI browser**. Local and SSH tmux listing
 use a private machine inventory, bounded concurrency and per-host deadlines.
-Local and SSH tmux attachment are available. The TUI and VMs are not implemented.
-No remote installation or provisioning is performed.
+Local and SSH tmux attachment are available. The TUI currently provides a
+read-only session browser with refresh and keyboard navigation. VMs are not
+implemented. No remote installation or provisioning is performed.
 
 ## Try the CLI
 
@@ -33,6 +34,17 @@ not globally persistent task IDs. Human output escapes special characters.
 Exit codes: 0 for success (including no server/sessions), 1 for operational errors,
 and 2 for invalid arguments. Operational tmux failures include a structured JSON
 error, with diagnostics on stderr.
+
+### Open the TUI
+
+```sh
+argos tui --config /path/inventory.toml
+argos tui --config ./config.local.toml
+```
+
+The first TUI slice is read-only. It shows discovered hosts and sessions, supports
+`j`/`k` or arrow navigation, `r` to refresh, and `q` to quit. Attachment from the
+TUI is intentionally left for the next slice.
 
 ### Attach to a local session
 
@@ -119,6 +131,7 @@ python3 tests/config_cli.py
 python3 tests/remote_ssh.py
 python3 tests/attach_tmux.py
 python3 tests/remote_attach.py
+python3 tests/tui.py
 ```
 
 The integration test uses a disposable real tmux server on a unique socket and
@@ -238,7 +251,7 @@ argos env inspect <machine/environment>
 argos env destroy <machine/environment>  # explicit destructive confirmation
 ```
 
-Local/SSH `list`, JSON output, filtering, local/SSH `attach`, and help are implemented today. Other commands
+Local/SSH `list`, JSON output, filtering, local/SSH `attach`, the first read-only TUI browser, and help are implemented today. Other commands
 are proposed, not installed commands. `start` will boot a stopped VM.
 It does **not** restore process memory. Detach/switch to keep agents and backends
 running; stopping a VM ends its processes while retaining its disk.

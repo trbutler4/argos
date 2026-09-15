@@ -59,9 +59,9 @@ subprocesses that outlive it are not guaranteed to be terminated in this slice.
 Reader threads never delay return past the deadline. Proxy cleanup needs a dedicated
 process-group follow-up before claiming arbitrary proxy-lifecycle coverage.
 
-M0a remains in progress. Remote acceptance still requires successful ordinary-key or
-agent-based SSH discovery on two real machines, then remote interactive attachment.
-NixOS activation remains user-controlled.
+M0a has a working CLI path for discovery and attachment. Remote discovery and attach
+have been exercised from the user's normal workflow. NixOS activation remains
+user-controlled.
 
 
 ### Slice 3: local attachment
@@ -80,7 +80,7 @@ No existing user clients were switched during testing.
 
 Behavior and acceptance boundaries:
 
-- Resolve exact session names or IDs, reject missing/ambiguous targets and remote hosts.
+- Resolve exact session names or IDs, reject missing/ambiguous targets.
 - Plain terminals execute native tmux attachment without detaching existing clients.
 - Inside the same server, switch only the invoking session's sole attached client.
   Multiple clients on that session are ambiguous and are refused. Cross-server nesting
@@ -92,9 +92,25 @@ Behavior and acceptance boundaries:
 - `tests/remote_attach.py` uses real loopback sshd, SSH and tmux to exercise
   plain-terminal remote attach plus a local tmux connection window. It verifies
   exact target IDs/names, detach behavior, terminal restoration and unchanged panes.
-- These checks do not establish OSC 52 clipboard interoperability, the TUI, or
-  remote attach from two physical tailnet machines. Test a real configured host
-  manually from an interactive terminal before pinning the installed package.
+- These checks do not establish OSC 52 clipboard interoperability, TUI-driven attach,
+  or complete M0b behavior. Test a real configured host manually from an interactive
+  terminal before pinning the installed package.
+
+### Slice 4: first read-only TUI
+
+Implemented interface: `argos tui` with the same config/host/local/socket selection
+as `list`. It renders a full-screen read-only session browser backed by the same
+snapshot discovery path as `list`, with `j`/`k` and arrow navigation, `r` refresh,
+and `q`/Esc/Ctrl-C quit. TUI attachment is intentionally deferred to the next slice.
+
+Verified: 18 Rust tests, fmt, Clippy, full existing local/config/real-SSH/attach
+integration suite, `tests/tui.py` against a real PTY, and packaged Nix TUI smoke
+checks all passed. The TUI PTY test verifies visible rendered session content,
+navigation/refresh/quit input, non-TTY refusal, and terminal-mode restoration.
+
+Boundaries: this is not the full M0b milestone yet. Search/filter, selected-session
+details, resize-specific assertions, and attach handoff/return-to-dashboard remain
+future work.
 
 Release boundaries: **M0a (CLI) is the first usable release** without VM/browser
 features. **M0b adds the full-screen TUI over CLI JSON output.**
@@ -105,8 +121,8 @@ feasibility proof, and M3 is optional polish.
 
 ### M0a: CLI foundation (first usable release)
 
-**Deliverable:** Rust `list` and `attach` commands that work across the real hosts.
-The TUI is not a prerequisite for using or testing this release.
+**Deliverable:** Rust `list`, `attach`, and first `tui` commands that work across the real hosts.
+The first TUI browser is read-only; attach from the TUI belongs to M0b follow-up work.
 
 1. Initialize the Cargo crate and a pinned Nix development shell for Rust/Cargo,
    rustfmt, Clippy and required CLI tools. Do not add a TUI framework yet.

@@ -9,6 +9,7 @@ use std::{
 mod attach;
 mod config;
 mod tmux;
+mod tui;
 
 #[derive(Parser, Debug)]
 #[command(name = "argos", version, about = "A command center for tmux work")]
@@ -43,24 +44,41 @@ enum Command {
         #[arg(long, conflicts_with_all=["socket", "config", "host"])]
         local: bool,
     },
+    /// Open the interactive terminal UI.
+    Tui {
+        #[arg(long, value_name="PATH", conflicts_with_all=["config", "host", "local"])]
+        socket: Option<String>,
+        #[arg(long, value_name="PATH", conflicts_with_all=["socket", "local"])]
+        config: Option<std::path::PathBuf>,
+        #[arg(long, value_name="ID", conflicts_with_all=["socket", "local"])]
+        host: Option<String>,
+        #[arg(long, conflicts_with_all=["socket", "config", "host"])]
+        local: bool,
+    },
 }
-#[derive(Serialize)]
-struct Snapshot {
-    schema_version: u32,
-    observed_at_unix_ms: u64,
-    hosts: Vec<Host>,
+#[derive(Clone, Serialize)]
+pub(crate) struct Snapshot {
+    pub(crate) schema_version: u32,
+    pub(crate) observed_at_unix_ms: u64,
+    pub(crate) hosts: Vec<Host>,
 }
-#[derive(Serialize)]
-struct Host {
-    id: String,
-    status: &'static str,
-    sessions: Vec<tmux::Session>,
-    error: Option<HostError>,
+#[derive(Clone, Serialize)]
+pub(crate) struct Host {
+    pub(crate) id: String,
+    pub(crate) status: &'static str,
+    pub(crate) sessions: Vec<tmux::Session>,
+    pub(crate) error: Option<HostError>,
 }
-#[derive(Serialize)]
-struct HostError {
-    code: String,
-    message: String,
+#[derive(Clone, Serialize)]
+pub(crate) struct HostError {
+    pub(crate) code: String,
+    pub(crate) message: String,
+}
+
+pub(crate) struct SnapshotRequest {
+    pub(crate) machines: Vec<(String, Option<String>, Option<String>)>,
+    pub(crate) timeout_secs: u64,
+    pub(crate) parallel: usize,
 }
 
 fn main() -> ExitCode {
@@ -86,6 +104,12 @@ fn main() -> ExitCode {
             host,
             local,
         } => attach::run(&session, socket, config, host, local),
+        Command::Tui {
+            socket,
+            config,
+            host,
+            local,
+        } => tui::run(socket, config, host, local),
     }
 }
 
@@ -96,8 +120,31 @@ fn run_list(
     host_filter: Option<String>,
     force_local: bool,
 ) -> ExitCode {
+    let request = match snapshot_request(socket, config_path, host_filter, force_local) {
+        Ok(request) => request,
+        Err((message, code)) => {
+            eprintln!("error: {message}");
+            return ExitCode::from(code);
+        }
+    };
+    let snap = discover_snapshot(&request);
+    print_snapshot(json, &snap);
+    if snap.hosts.iter().any(|h| h.error.is_some()) {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+pub(crate) fn snapshot_request(
+    socket: Option<String>,
+    config_path: Option<std::path::PathBuf>,
+    host_filter: Option<String>,
+    force_local: bool,
+) -> Result<SnapshotRequest, (String, u8)> {
     if force_local || socket.is_some() {
-        return run_local(json, socket);
+        return local_request(socket)
+            .map_err(|error| (format!("cannot read local hostname: {error}"), 1));
     }
     let loaded = match config_path {
         Some(path) => config::load(&path).map(Some),
@@ -108,21 +155,21 @@ fn run_list(
     };
     let config = match loaded {
         Ok(Some(config)) => config,
-        Ok(None) if host_filter.is_none() => return run_local(json, None),
+        Ok(None) if host_filter.is_none() => {
+            return local_request(None)
+                .map_err(|error| (format!("cannot read local hostname: {error}"), 1));
+        }
         Ok(None) => {
-            eprintln!("error: --host requires a configured inventory");
-            return ExitCode::from(2);
+            return Err(("--host requires a configured inventory".into(), 2));
         }
         Err(error) => {
-            eprintln!("error: {error}");
-            return ExitCode::from(2);
+            return Err((error, 2));
         }
     };
     if let Some(id) = &host_filter
         && !config.machines.contains_key(id)
     {
-        eprintln!("error: unknown host id: {id}");
-        return ExitCode::from(2);
+        return Err((format!("unknown host id: {id}"), 2));
     }
     let machines = config
         .machines
@@ -136,22 +183,19 @@ fn run_list(
             )
         })
         .collect();
-    discover_and_print(
-        json,
+    Ok(SnapshotRequest {
         machines,
-        config.client.connect_timeout_seconds,
-        config.client.max_parallel_probes,
-    )
+        timeout_secs: config.client.connect_timeout_seconds,
+        parallel: config.client.max_parallel_probes,
+    })
 }
 
-fn run_local(json: bool, socket: Option<String>) -> ExitCode {
-    match local_hostname() {
-        Ok(id) => discover_and_print(json, vec![(id, None, socket)], 3, 1),
-        Err(error) => {
-            eprintln!("error: cannot read local hostname: {error}");
-            ExitCode::from(1)
-        }
-    }
+fn local_request(socket: Option<String>) -> Result<SnapshotRequest, std::io::Error> {
+    Ok(SnapshotRequest {
+        machines: vec![(local_hostname()?, None, socket)],
+        timeout_secs: 3,
+        parallel: 1,
+    })
 }
 
 fn local_hostname() -> Result<String, std::io::Error> {
@@ -159,23 +203,19 @@ fn local_hostname() -> Result<String, std::io::Error> {
         .trim_end_matches(['\r', '\n'])
         .to_owned())
 }
-fn discover_and_print(
-    json: bool,
-    machines: Vec<(String, Option<String>, Option<String>)>,
-    timeout_secs: u64,
-    parallel: usize,
-) -> ExitCode {
+pub(crate) fn discover_snapshot(request: &SnapshotRequest) -> Snapshot {
     let results = Arc::new(Mutex::new(
-        (0..machines.len())
+        (0..request.machines.len())
             .map(|_| None)
             .collect::<Vec<Option<Host>>>(),
     ));
     let next = Arc::new(Mutex::new(0usize));
     std::thread::scope(|scope| {
-        for _ in 0..parallel.min(machines.len().max(1)) {
+        for _ in 0..request.parallel.min(request.machines.len().max(1)) {
             let results = Arc::clone(&results);
             let next = Arc::clone(&next);
-            let machines = &machines;
+            let machines = &request.machines;
+            let timeout_secs = request.timeout_secs;
             scope.spawn(move || {
                 loop {
                     let i = {
@@ -224,15 +264,17 @@ fn discover_and_print(
         .iter_mut()
         .map(|h| h.take().unwrap())
         .collect::<Vec<_>>();
-    let failed = hosts.iter().any(|h| h.error.is_some());
-    let snap = Snapshot {
+    Snapshot {
         schema_version: 1,
         observed_at_unix_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
         hosts,
-    };
+    }
+}
+
+fn print_snapshot(json: bool, snap: &Snapshot) {
     if json {
         println!("{}", serde_json::to_string(&snap).unwrap());
     } else {
@@ -257,11 +299,6 @@ fn discover_and_print(
                 );
             }
         }
-    }
-    if failed {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
     }
 }
 
