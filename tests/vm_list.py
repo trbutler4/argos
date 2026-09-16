@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only VM state listing checks."""
+"""VM state create/list checks. Create writes state only and never starts guests."""
 import json
 import os
 from pathlib import Path
@@ -61,10 +61,36 @@ def main():
 
         relative = run(str(BINARY), "vm", "list", "--state-dir", "relative", "--json")
         assert relative.returncode == 2
+
+        create_state = root / "create-state"
+        work_root = root / "work-root"
+        source = root / "source.git"
+        init = run("git", "init", "--bare", str(source))
+        assert init.returncode == 0, init.stderr
+        dry = run(str(BINARY), "vm", "create", "Trade Feature", "--repo", str(source), "--project", "trade", "--state-dir", str(create_state), "--work-root", str(work_root), "--dry-run", "--json")
+        assert dry.returncode == 0, dry.stderr
+        dry_value = json.loads(dry.stdout)
+        assert dry_value["dry_run"] is True and dry_value["record"]["id"] == "trade-feature"
+        assert not create_state.exists(), "dry-run wrote state"
+        created = run(str(BINARY), "vm", "create", "Trade Feature", "--repo", str(source), "--project", "trade", "--state-dir", str(create_state), "--work-root", str(work_root), "--json")
+        assert created.returncode == 0, created.stderr
+        value = json.loads(created.stdout)
+        assert value["dry_run"] is False
+        assert Path(value["state_file"]).is_file()
+        assert Path(value["microvm_config"]).read_text().count("ARGOS_VM_READY") == 1
+        assert (work_root / "trade-feature" / "repo" / ".git").is_dir()
+        listed = json.loads(run(str(BINARY), "vm", "list", "--state-dir", str(create_state), "--json").stdout)
+        assert [vm["id"] for vm in listed["vms"]] == ["trade-feature"]
+        assert listed["vms"][0]["status"] == "created"
+        duplicate = run(str(BINARY), "vm", "create", "Trade Feature", "--state-dir", str(create_state), "--json")
+        assert duplicate.returncode == 1 and "already exists" in duplicate.stderr
+        bad_args = run(str(BINARY), "vm", "create", "bad", "--id", "bad/slash", "--state-dir", str(create_state), "--json")
+        assert bad_args.returncode == 2
+
         (vms / "bad.json").write_text(json.dumps(record("bad/slash")))
         bad = run(str(BINARY), "vm", "list", "--state-dir", str(state), "--json")
         assert bad.returncode == 1 and "invalid_state" in bad.stderr
-    print("PASS: VM list reads deterministic local state, handles empty/malformed state, and never creates VMs.")
+    print("PASS: VM create/list manages deterministic local state, clone/config scaffolds, malformed state, and never starts guests.")
 
 
 if __name__ == "__main__":

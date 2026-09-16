@@ -105,6 +105,26 @@ enum VmCommand {
         #[arg(long, value_name = "PATH")]
         state_dir: Option<std::path::PathBuf>,
     },
+    /// Create a local VM record, work directory, optional repo clone, and microVM config.
+    Create {
+        name: String,
+        #[arg(long, value_name = "ID")]
+        id: Option<String>,
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        work_root: Option<std::path::PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 #[derive(Clone, Serialize)]
 pub(crate) struct Snapshot {
@@ -172,6 +192,27 @@ fn main() -> ExitCode {
         },
         Command::Vm { command } => match command {
             VmCommand::List { json, state_dir } => vm::list(json, state_dir),
+            VmCommand::Create {
+                name,
+                id,
+                repo,
+                project,
+                host,
+                state_dir,
+                work_root,
+                dry_run,
+                json,
+            } => vm::create(vm::CreateOptions {
+                name,
+                id,
+                repo,
+                project,
+                host,
+                state_dir,
+                work_root,
+                dry_run,
+                json,
+            }),
         },
     }
 }

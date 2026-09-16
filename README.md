@@ -107,20 +107,23 @@ or through configured SSH aliases so the controller can check VM hosts before as
 
 ### VM state scaffold
 
-The first VM lifecycle slice is read-only. It lists local VM records from the
-host's Argos state directory without creating directories, starting guests or
-modifying host services:
+The first VM lifecycle commands are conservative and host-local. `create` writes
+state, creates a per-VM work directory, optionally clones a separate repo, and
+renders a microVM config, but it does not build or start a guest:
 
 ```sh
 argos vm list
 argos vm list --json
+argos vm create "Trade Feature" --repo /path/or/git-url --project trade
+argos vm create "Trade Feature" --repo /path/or/git-url --dry-run --json
 argos vm list --state-dir /absolute/test/state --json
 ```
 
 State records live under `$ARGOS_STATE_DIR/vms/*.json`, otherwise
 `$XDG_STATE_HOME/argos/vms/*.json` or `~/.local/state/argos/vms/*.json`.
-This establishes the JSON envelope and state-file shape that later `vm create`,
-`vm start` and `vm stop` commands will update.
+Generated instance scaffolds live under `instances/`, and default work clones
+under `workdirs/`. This establishes the state-file shape that later `vm start`
+and `vm stop` commands will consume.
 
 ### MicroVM prototype
 
