@@ -382,3 +382,8 @@ must not substitute for the real SSH/tmux/VM/browser checks above. Use disposabl
 sessions and data, never kill existing user work for a test. Record commands, observed
 results and remaining blockers beside each milestone. Do not add code or provision
 machines in a scoping-only change.
+
+
+### Slice 7: controller host status aggregation
+
+Add `argos hosts status` so the controller can call installed Argos helpers on each configured machine with bounded SSH, report helper versions, state/runtime paths and microVM capability, and filter to one host with `--host`.

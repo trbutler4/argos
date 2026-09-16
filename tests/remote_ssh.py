@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real loopback SSH integration for argos. Uses only disposable user-owned state."""
 import json
+import shlex
 import os
 from pathlib import Path
 import pwd
@@ -58,6 +59,11 @@ def main():
         bad_known_hosts = root / "empty_known_hosts"
         ssh_config = root / "ssh_config"
         sshd_config = root / "sshd_config"
+        remote_bin = root / "remote-bin"
+        remote_bin.mkdir()
+        remote_argos = remote_bin / "argos"
+        remote_argos.write_text(f"#!/bin/sh\nexec {shlex.quote(str(BINARY.resolve()))} \"$@\"\n")
+        remote_argos.chmod(0o755)
         port = free_port()
         user = pwd.getpwuid(os.getuid()).pw_name
         env = dict(os.environ, PATH=str(root / "ssh-wrapper") + os.pathsep + os.environ["PATH"])
@@ -82,7 +88,7 @@ def main():
         sshd_config.write_text(
             f"HostKey {server_key}\nAuthorizedKeysFile {authorized}\nUsePAM no\nStrictModes no\n"
             f"PasswordAuthentication no\nAuthenticationMethods publickey\nListenAddress 127.0.0.1\nPort {port}\n"
-            "LogLevel ERROR\nPidFile none\n"
+            f"LogLevel ERROR\nPidFile none\nSetEnv PATH={remote_bin}:{os.environ['PATH']}\n"
         )
         (root / "config.toml").write_text(
             f"schema_version = 1\n[client]\nmachine_id = 'local'\nconnect_timeout_seconds = 2\n"
@@ -127,6 +133,14 @@ def main():
             assert before == tmux("list-panes", "-a", "-F", "#{pane_id}:#{pane_pid}")
             assert len(snapshot(root / "config.toml", "--host", "remote", env=env)["hosts"]) == 1
 
+            status = cli("hosts", "status", "--config", str(root / "config.toml"), "--json", env=env)
+            helpers = json.loads(status.stdout)["hosts"]
+            assert {host["id"] for host in helpers} == {"local", "remote"}
+            assert all(host["status"] == "ok" and host["helper"]["schema_version"] == 1 for host in helpers)
+            assert any(host["id"] == "remote" and host["helper"]["hostname"] for host in helpers)
+            remote_only = cli("hosts", "status", "--config", str(root / "config.toml"), "--host", "remote", "--json", env=env)
+            assert [host["id"] for host in json.loads(remote_only.stdout)["hosts"]] == ["remote"]
+
             # Remote missing/invalid sockets must not be confused with SSH failures.
             original_inventory = (root / "config.toml").read_text()
             (root / "config.toml").write_text(original_inventory.replace(json.dumps(str(socket_path)), json.dumps(str(root / "missing.sock"))))
@@ -157,7 +171,7 @@ def main():
                 sshd.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 sshd.kill(); sshd.wait()
-    print("PASS: real loopback sshd, SSH host-key/auth errors, partial JSON, filtering, and isolated tmux")
+    print("PASS: real loopback sshd, SSH host status helper, SSH host-key/auth errors, partial JSON, filtering, and isolated tmux")
 
 
 if __name__ == "__main__":

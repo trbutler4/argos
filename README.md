@@ -11,7 +11,7 @@ Status: **multi-machine CLI discovery with a simple TUI browser**. Local and SSH
 use a private machine inventory, bounded concurrency and per-host deadlines.
 Local and SSH tmux attachment are available. The TUI provides session browsing,
 refresh, keyboard navigation, and Enter-to-attach terminal handoff. A first
-microvm.nix QEMU prototype builds and boots, and `argos host status` reports
+microvm.nix QEMU prototype builds and boots, and `argos host status` / `argos hosts status` report
 installed-host VM readiness. VM SSH, project setup and environment management
 commands are not implemented. No remote installation or provisioning is performed.
 
@@ -97,11 +97,13 @@ contract is read-only:
 ```sh
 argos host status
 argos host status --json
+argos hosts status --config ./config.local.toml
+argos hosts status --config ./config.local.toml --json
 ```
 
-It reports the installed Argos version, host state/runtime directories, tool
-availability and whether `/dev/kvm` is accessible. This is the command the client
-will eventually run through SSH before asking a host to create or start VMs.
+`argos host status` reports the installed Argos version, host state/runtime directories, tool
+availability and whether `/dev/kvm` is accessible. `argos hosts status` runs that helper locally
+or through configured SSH aliases so the controller can check VM hosts before asking them to create or start VMs.
 
 ### MicroVM prototype
 

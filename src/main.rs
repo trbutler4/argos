@@ -61,6 +61,11 @@ enum Command {
         #[command(subcommand)]
         command: HostCommand,
     },
+    /// Query installed Argos helpers across configured hosts.
+    Hosts {
+        #[command(subcommand)]
+        command: HostsCommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -69,6 +74,19 @@ enum HostCommand {
     Status {
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum HostsCommand {
+    /// Report installed Argos helper and VM capability status for configured hosts.
+    Status {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, value_name = "PATH")]
+        config: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "ID")]
+        host: Option<String>,
     },
 }
 #[derive(Clone, Serialize)]
@@ -127,6 +145,13 @@ fn main() -> ExitCode {
         } => tui::run(socket, config, host, local),
         Command::Host { command } => match command {
             HostCommand::Status { json } => host::status(json),
+        },
+        Command::Hosts { command } => match command {
+            HostsCommand::Status {
+                json,
+                config,
+                host: host_filter,
+            } => host::hosts_status(json, config, host_filter),
         },
     }
 }
