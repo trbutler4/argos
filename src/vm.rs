@@ -1,4 +1,4 @@
-use crate::host;
+use crate::{config, host};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -117,6 +117,7 @@ pub(crate) struct CreateOptions {
     pub(crate) host: Option<String>,
     pub(crate) state_dir: Option<PathBuf>,
     pub(crate) work_root: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
     pub(crate) dry_run: bool,
     pub(crate) json: bool,
 }
@@ -124,6 +125,7 @@ pub(crate) struct CreateOptions {
 pub(crate) struct StartOptions {
     pub(crate) id: String,
     pub(crate) state_dir: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
     pub(crate) json: bool,
 }
 
@@ -168,6 +170,13 @@ pub(crate) fn list(json: bool, state_dir: Option<PathBuf>) -> ExitCode {
 }
 
 pub(crate) fn create(options: CreateOptions) -> ExitCode {
+    let tmux_config = match load_guest_tmux_config(options.config.as_deref()) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("error: {}: {}", error.code, error.message);
+            return ExitCode::from(2);
+        }
+    };
     let output = match create_plan(&options) {
         Ok(plan) => plan,
         Err(error) => {
@@ -177,7 +186,7 @@ pub(crate) fn create(options: CreateOptions) -> ExitCode {
         }
     };
     if !options.dry_run
-        && let Err(error) = create_vm_state(&output)
+        && let Err(error) = create_vm_state(&output, tmux_config.as_deref())
     {
         eprintln!("error: {}: {}", error.code, error.message);
         return ExitCode::from(1);
@@ -322,7 +331,7 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
     })
 }
 
-fn create_vm_state(output: &VmCreateOutput) -> Result<(), VmError> {
+fn create_vm_state(output: &VmCreateOutput, tmux_config: Option<&str>) -> Result<(), VmError> {
     let state_file = PathBuf::from(&output.state_file);
     if state_file.exists() {
         return Err(VmError {
@@ -376,9 +385,10 @@ fn create_vm_state(output: &VmCreateOutput) -> Result<(), VmError> {
             });
         }
     }
+    write_guest_tmux_config(&instance_dir, tmux_config)?;
     fs::write(
         &output.microvm_config,
-        render_microvm_config(&output.record),
+        render_microvm_config(&output.record, tmux_config),
     )
     .map_err(|error| {
         state_error(format!(
@@ -421,6 +431,7 @@ fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
             "VM id must be 1-64 chars of letters, digits, '_' or '-'",
         ));
     }
+    let tmux_config = load_guest_tmux_config(options.config.as_deref())?;
     let state_root = state_root(options.state_dir)?;
     let state_file = state_root.join("vms").join(format!("{}.json", options.id));
     let mut record = load_record(&state_file)?;
@@ -491,7 +502,12 @@ fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
     record.ssh_host = Some(ssh_host.clone());
     record.ssh_port = Some(ssh_port);
     record.ssh_user = Some(ssh_user);
-    fs::write(&microvm_config, render_microvm_config(&record)).map_err(|error| {
+    write_guest_tmux_config(&instance_dir, tmux_config.as_deref())?;
+    fs::write(
+        &microvm_config,
+        render_microvm_config(&record, tmux_config.as_deref()),
+    )
+    .map_err(|error| {
         state_error(format!(
             "cannot write microVM config {}: {error}",
             microvm_config.display()
@@ -820,7 +836,7 @@ fn run_guest_command(options: GuestCommandOptions) -> Result<ExitCode, VmError> 
         ])
         .arg(destination);
     if options.tmux {
-        command.arg("tmux new -A -s main");
+        command.arg("if [ -f /etc/tmux.conf ]; then exec tmux -f /etc/tmux.conf new -A -s main; else exec tmux new -A -s main; fi");
     }
     #[cfg(unix)]
     {
@@ -1190,12 +1206,14 @@ fn render_instance_flake() -> String {
     )
 }
 
-fn render_microvm_config(record: &VmRecord) -> String {
+fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String {
     let ssh_port = record
         .ssh_port
         .unwrap_or_else(|| ssh_port_for_id(&record.id));
     let keys = authorized_keys_nix();
     let mac = mac_for_id(&record.id);
+    let tmux_block = render_tmux_config_block(tmux_config);
+    let tmux_store_shares = render_tmux_store_shares(tmux_config);
     format!(
         r#"{{ pkgs, lib, ... }}:
 {{
@@ -1214,7 +1232,7 @@ fn render_microvm_config(record: &VmRecord) -> String {
   }};
 
   environment.systemPackages = with pkgs; [ git tmux openssh ];
-
+{tmux_block}
   systemd.services.argos-ready = {{
     description = "Argos VM readiness marker";
     wantedBy = [ "multi-user.target" ];
@@ -1247,7 +1265,7 @@ fn render_microvm_config(record: &VmRecord) -> String {
         source = "/nix/store";
         mountPoint = "/nix/.ro-store";
       }}
-    ];
+{tmux_store_shares}    ];
   }};
 }}
 "#,
@@ -1256,7 +1274,87 @@ fn render_microvm_config(record: &VmRecord) -> String {
         keys = keys,
         mac = serde_json::to_string(&mac).unwrap(),
         ssh_port = ssh_port,
+        tmux_block = tmux_block,
+        tmux_store_shares = tmux_store_shares,
     )
+}
+
+fn render_tmux_config_block(tmux_config: Option<&str>) -> String {
+    let Some(_config) = tmux_config else {
+        return String::new();
+    };
+    String::from(
+        r#"
+  environment.etc."tmux.conf".source = ./guest-tmux.conf;
+  environment.etc."argos/tmux.conf".source = ./guest-tmux.conf;
+"#,
+    )
+}
+
+fn render_tmux_store_shares(tmux_config: Option<&str>) -> String {
+    let Some(config) = tmux_config else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for (index, path) in store_paths_in_text(config).into_iter().enumerate() {
+        let source = serde_json::to_string(&path).unwrap();
+        out.push_str(&format!(
+            r#"      {{
+        proto = "9p";
+        tag = "tmux-store-{index}";
+        source = {source};
+        mountPoint = {source};
+      }}
+"#
+        ));
+    }
+    out
+}
+
+fn store_paths_in_text(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut rest = text;
+    while let Some(index) = rest.find("/nix/store/") {
+        let candidate = &rest[index..];
+        let name_start = "/nix/store/".len();
+        let Some(name_end) = candidate[name_start..].find('/') else {
+            break;
+        };
+        let path = &candidate[..name_start + name_end];
+        if Path::new(path).exists() && !paths.iter().any(|existing| existing == path) {
+            paths.push(path.to_string());
+        }
+        rest = &candidate[name_start + name_end..];
+    }
+    paths
+}
+
+fn write_guest_tmux_config(instance_dir: &Path, tmux_config: Option<&str>) -> Result<(), VmError> {
+    let path = instance_dir.join("guest-tmux.conf");
+    let Some(config) = tmux_config else {
+        if let Err(error) = fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(state_error(format!(
+                "cannot remove guest tmux config {}: {error}",
+                path.display()
+            )));
+        }
+        return Ok(());
+    };
+    fs::write(&path, config).map_err(|error| {
+        state_error(format!(
+            "cannot write guest tmux config {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn load_guest_tmux_config(path: Option<&Path>) -> Result<Option<String>, VmError> {
+    config::guest_tmux_config(path).map_err(|message| VmError {
+        code: "config_error",
+        message,
+    })
 }
 
 fn authorized_keys_nix() -> String {
@@ -1319,6 +1417,16 @@ mod tests {
     fn slugs_names() {
         assert_eq!(slug("Trade Feature!"), "trade-feature");
         assert_eq!(slug("---"), "");
+    }
+
+    #[test]
+    fn extracts_store_paths_from_tmux_config() {
+        let cargo = env!("CARGO");
+        let root = cargo.strip_suffix("/bin/cargo").unwrap_or(cargo);
+        let paths = store_paths_in_text(&format!("run-shell {cargo} and {root}/bin/rustc"));
+        if Path::new(root).exists() {
+            assert_eq!(paths, vec![root.to_string()]);
+        }
     }
 
     #[test]

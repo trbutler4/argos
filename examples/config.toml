@@ -17,3 +17,11 @@ max_parallel_probes = 4
 ssh_alias = "server"
 # Optional remote Unix socket. Omit to use the remote tmux default.
 # socket = "/absolute/path/to/tmux.sock"
+
+# Optional guest tmux configuration for locally managed VMs. Set exactly one of
+# config_path or config_text. Relative paths resolve from this config file.
+# [vm.guest_tmux]
+# config_path = "/absolute/path/to/tmux.conf"
+# config_text = """
+# set -g mouse on
+# """

@@ -156,19 +156,21 @@ report whether the host is ready for those future steps.
 Implemented interface: `argos vm list [--json] [--state-dir PATH]`,
 `argos vm create NAME [--repo REPO] [--dry-run]`, `argos vm start ID`,
 `argos vm shell ID`, `argos vm tmux ID`, `argos vm console ID`, and
-`argos vm stop ID`. This is conservative host-local VM lifecycle scaffolding.
-`list` reads versioned JSON VM records from the host Argos state directory under
+`argos vm stop ID`. `create` and `start` accept `--config` and use
+`[vm.guest_tmux]` `config_text` or `config_path` to install a guest tmux config.
+This is conservative host-local VM lifecycle scaffolding. `list` reads versioned JSON VM records from the host Argos state directory under
 `vms/*.json`, returns a stable schema versioned snapshot, sorts records by ID,
 treats missing state as an empty list, and rejects malformed state. `create`
 writes one VM record, creates per-VM instance/work directories, optionally
 performs a separate `git clone`, and renders a microVM config plus instance
 flake. `start` builds the runner from that instance flake, launches it in a
 dedicated host tmux console session, waits for the guest readiness marker, and
-records PID/log/session/SSH metadata. `shell` SSHes into the guest over the
-recorded local forwarded port, `tmux` SSHes into `tmux new -A -s main` inside the
-guest, `console` switches or attaches to the serial-console tmux session as a
-fallback, and `stop` terminates the recorded local process while keeping
-persistent instance data.
+records PID/log/session/SSH metadata and rewrites the generated microVM config
+from the selected Argos config so guest tmux settings can change between starts.
+`shell` SSHes into the guest over the recorded local forwarded port, `tmux`
+SSHes into `tmux new -A -s main` inside the guest, `console` switches or attaches
+to the serial-console tmux session as a fallback, and `stop` terminates the
+recorded local process while keeping persistent instance data.
 
 Boundaries: no remote VM placement, no systemd user units, no port-collision
 recovery, no richer guest project setup, and no state migration exist in this

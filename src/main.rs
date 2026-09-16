@@ -120,6 +120,8 @@ enum VmCommand {
         state_dir: Option<std::path::PathBuf>,
         #[arg(long, value_name = "PATH")]
         work_root: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        config: Option<std::path::PathBuf>,
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
@@ -130,6 +132,8 @@ enum VmCommand {
         id: String,
         #[arg(long, value_name = "PATH")]
         state_dir: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        config: Option<std::path::PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -234,6 +238,7 @@ fn main() -> ExitCode {
                 host,
                 state_dir,
                 work_root,
+                config,
                 dry_run,
                 json,
             } => vm::create(vm::CreateOptions {
@@ -244,16 +249,19 @@ fn main() -> ExitCode {
                 host,
                 state_dir,
                 work_root,
+                config,
                 dry_run,
                 json,
             }),
             VmCommand::Start {
                 id,
                 state_dir,
+                config,
                 json,
             } => vm::start(vm::StartOptions {
                 id,
                 state_dir,
+                config,
                 json,
             }),
             VmCommand::Stop {

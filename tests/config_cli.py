@@ -40,6 +40,9 @@ def main():
         cli("--json", code=2)
         assert json.loads(cli("--socket", str(sock), "--json").stdout)["hosts"][0]["status"] == "ok"
         assert json.loads(cli("--local", "--json").stdout)["hosts"][0]["status"] == "ok"
+        vm_config = valid + '[vm.guest_tmux]\nconfig_text="set -g mouse on"\n'
+        config.write_text(vm_config)
+        assert json.loads(cli("--config", str(config), "--json").stdout)["hosts"] == expected
 
         for bad in [valid.replace("schema_version=1", "schema_version=2"),
                     valid.replace("[client]", "unknown=1\n[client]"),
@@ -49,7 +52,8 @@ def main():
                     valid + '[machines.peer]\nssh_alias="-oProxyCommand=bad"\n',
                     valid + '[machines.peer]\nssh_alias="host; touch never"\n',
                     valid + '[machines.peer]\n',
-                    valid + '[machines.peer]\nssh_alias="valid"\nsocket=""\n']:
+                    valid + '[machines.peer]\nssh_alias="valid"\nsocket=""\n',
+                    valid + '[vm.guest_tmux]\nconfig_text="a"\nconfig_path="b"\n']:
             config.write_text(bad)
             cli("--config", str(config), "--json", code=2)
         assert not sock.exists(), "Config tests started a server"

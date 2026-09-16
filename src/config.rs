@@ -11,6 +11,24 @@ pub struct Config {
     pub schema_version: u32,
     pub client: Client,
     pub machines: BTreeMap<String, Machine>,
+    #[serde(default)]
+    pub vm: Option<VmConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VmConfig {
+    #[serde(default)]
+    pub guest_tmux: Option<GuestTmuxConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestTmuxConfig {
+    #[serde(default)]
+    pub config_text: Option<String>,
+    #[serde(default)]
+    pub config_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +82,53 @@ pub fn load_implicit(path: &Path) -> Result<Option<Config>, String> {
     parse(&text, path).map(Some)
 }
 
+pub fn load_selected(path: Option<&Path>) -> Result<Option<(Config, PathBuf)>, String> {
+    match path {
+        Some(path) => load(path).map(|config| Some((config, path.to_path_buf()))),
+        None => {
+            let Some(path) = default_path() else {
+                return Ok(None);
+            };
+            load_implicit(&path).map(|config| config.map(|config| (config, path)))
+        }
+    }
+}
+
+pub fn guest_tmux_config(path: Option<&Path>) -> Result<Option<String>, String> {
+    let Some((config, config_path)) = load_selected(path)? else {
+        return Ok(None);
+    };
+    let Some(vm) = config.vm.as_ref() else {
+        return Ok(None);
+    };
+    let Some(tmux) = vm.guest_tmux.as_ref() else {
+        return Ok(None);
+    };
+    match (&tmux.config_text, &tmux.config_path) {
+        (Some(_), Some(_)) => {
+            Err("vm.guest_tmux cannot set both config_text and config_path".into())
+        }
+        (Some(text), None) => Ok(Some(text.clone())),
+        (None, Some(path)) => {
+            let path = if path.is_absolute() {
+                path.clone()
+            } else {
+                config_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(path)
+            };
+            fs::read_to_string(&path).map(Some).map_err(|error| {
+                format!(
+                    "cannot read vm.guest_tmux.config_path {}: {error}",
+                    path.display()
+                )
+            })
+        }
+        (None, None) => Ok(None),
+    }
+}
+
 fn parse(text: &str, path: &Path) -> Result<Config, String> {
     let config: Config =
         toml::from_str(text).map_err(|e| format!("invalid config {}: {e}", path.display()))?;
@@ -98,6 +163,26 @@ pub fn validate(config: &Config) -> Result<(), String> {
         })?;
     if local.ssh_alias.is_some() {
         return Err("client.machine_id must be local and cannot have ssh_alias".into());
+    }
+    if let Some(vm) = &config.vm
+        && let Some(tmux) = &vm.guest_tmux
+    {
+        if tmux.config_text.is_some() && tmux.config_path.is_some() {
+            return Err("vm.guest_tmux cannot set both config_text and config_path".into());
+        }
+        if let Some(text) = &tmux.config_text
+            && text.contains('\0')
+        {
+            return Err("vm.guest_tmux.config_text cannot contain NUL bytes".into());
+        }
+        if let Some(path) = &tmux.config_path {
+            if path.as_os_str().is_empty() {
+                return Err("vm.guest_tmux.config_path cannot be empty".into());
+            }
+            if path.to_string_lossy().chars().any(|c| c == '\0') {
+                return Err("vm.guest_tmux.config_path cannot contain NUL bytes".into());
+            }
+        }
     }
     for (id, machine) in &config.machines {
         if !valid_id(id) {

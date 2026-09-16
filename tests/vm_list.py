@@ -32,6 +32,18 @@ def record(vm_id, **overrides):
     return value
 
 
+def config_text(tmux_section):
+    return f'''schema_version = 1
+[client]
+machine_id = "local"
+
+[machines.local]
+
+[vm.guest_tmux]
+{tmux_section}
+'''
+
+
 def main():
     assert BINARY.is_file(), "Run cargo build --locked first"
     with tempfile.TemporaryDirectory(prefix="argos-vm-list-") as temp:
@@ -65,6 +77,14 @@ def main():
 
         create_state = root / "create-state"
         work_root = root / "work-root"
+        tmux_conf = root / "guest.tmux.conf"
+        tmux_conf.write_text("set -g status-left 'argos-vm-test'\n")
+        argos_config = root / "argos.toml"
+        argos_config.write_text(config_text(f'config_path = "{tmux_conf}"'))
+        inline_config = root / "argos-inline.toml"
+        inline_config.write_text(config_text('config_text = "set -g status-right inline"'))
+        bad_tmux_config = root / "argos-bad-tmux.toml"
+        bad_tmux_config.write_text(config_text(f'config_text = "a"\nconfig_path = "{tmux_conf}"'))
         source = root / "source.git"
         init = run("git", "init", "--bare", str(source))
         assert init.returncode == 0, init.stderr
@@ -73,7 +93,9 @@ def main():
         dry_value = json.loads(dry.stdout)
         assert dry_value["dry_run"] is True and dry_value["record"]["id"] == "trade-feature"
         assert not create_state.exists(), "dry-run wrote state"
-        created = run(str(BINARY), "vm", "create", "Trade Feature", "--repo", str(source), "--project", "trade", "--state-dir", str(create_state), "--work-root", str(work_root), "--json")
+        invalid_config = run(str(BINARY), "vm", "create", "bad config", "--state-dir", str(create_state), "--config", str(bad_tmux_config), "--json")
+        assert invalid_config.returncode == 2 and "vm.guest_tmux" in invalid_config.stderr
+        created = run(str(BINARY), "vm", "create", "Trade Feature", "--repo", str(source), "--project", "trade", "--state-dir", str(create_state), "--work-root", str(work_root), "--config", str(argos_config), "--json")
         assert created.returncode == 0, created.stderr
         value = json.loads(created.stdout)
         assert value["dry_run"] is False
@@ -82,6 +104,8 @@ def main():
         assert microvm_text.count("ARGOS_VM_READY") == 1
         assert "services.openssh" in microvm_text
         assert "forwardPorts" in microvm_text
+        assert 'environment.etc."argos/tmux.conf".source = ./guest-tmux.conf' in microvm_text
+        assert (Path(value["microvm_config"]).parent / "guest-tmux.conf").read_text() == tmux_conf.read_text()
         assert value["record"]["ssh_host"] == "127.0.0.1"
         assert value["record"]["ssh_user"] == "root"
         assert isinstance(value["record"]["ssh_port"], int)
@@ -113,7 +137,11 @@ out = pathlib.Path(args[args.index("--out-link") + 1])
 runner = pathlib.Path({str(fake_store)!r}) / out.parent.name
 (runner / "bin").mkdir(parents=True, exist_ok=True)
 run = runner / "bin" / "microvm-run"
-run.write_text('''#!/bin/sh\nid=$(basename "$PWD")\necho "ARGOS_VM_READY id=$id host=fake"\nexec sleep 60\n''')
+run.write_text('''#!/bin/sh
+id=$(basename "$PWD")
+echo "ARGOS_VM_READY id=$id host=fake"
+exec sleep 60
+''')
 run.chmod(run.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 if out.exists() or out.is_symlink():
     out.unlink()
@@ -123,7 +151,7 @@ out.symlink_to(runner)
         fake_env = os.environ.copy()
         fake_env["PATH"] = f"{fake_bin}:{fake_env['PATH']}"
         run("tmux", "kill-session", "-t", "argos-vm-trade-feature")
-        started = run(str(BINARY), "vm", "start", "trade-feature", "--state-dir", str(create_state), "--json", env=fake_env)
+        started = run(str(BINARY), "vm", "start", "trade-feature", "--state-dir", str(create_state), "--config", str(inline_config), "--json", env=fake_env)
         assert started.returncode == 0, started.stderr
         start_value = json.loads(started.stdout)
         assert start_value["already_running"] is False
@@ -132,6 +160,7 @@ out.symlink_to(runner)
         assert start_value["console_session"] == "argos-vm-trade-feature"
         assert start_value["record"]["console_session"] == "argos-vm-trade-feature"
         assert Path(start_value["log_path"]).read_text().count("ARGOS_VM_READY id=trade-feature") == 1
+        assert (Path(value["microvm_config"]).parent / "guest-tmux.conf").read_text() == "set -g status-right inline"
         assert run("tmux", "has-session", "-t", "argos-vm-trade-feature").returncode == 0
         console = run(str(BINARY), "vm", "console", "trade-feature", "--state-dir", str(create_state))
         assert console.returncode == 1 and "requires a terminal" in console.stderr
@@ -139,7 +168,7 @@ out.symlink_to(runner)
         assert shell.returncode == 1 and "requires a terminal" in shell.stderr
         guest_tmux = run(str(BINARY), "vm", "tmux", "trade-feature", "--state-dir", str(create_state))
         assert guest_tmux.returncode == 1 and "requires a terminal" in guest_tmux.stderr
-        again = run(str(BINARY), "vm", "start", "trade-feature", "--state-dir", str(create_state), "--json", env=fake_env)
+        again = run(str(BINARY), "vm", "start", "trade-feature", "--state-dir", str(create_state), "--config", str(inline_config), "--json", env=fake_env)
         assert again.returncode == 0, again.stderr
         assert json.loads(again.stdout)["already_running"] is True
         stopped = run(str(BINARY), "vm", "stop", "trade-feature", "--state-dir", str(create_state), "--json")
@@ -156,7 +185,7 @@ out.symlink_to(runner)
         (vms / "bad.json").write_text(json.dumps(record("bad/slash")))
         bad = run(str(BINARY), "vm", "list", "--state-dir", str(state), "--json")
         assert bad.returncode == 1 and "invalid_state" in bad.stderr
-    print("PASS: VM create/start/shell/tmux/console/stop/list manages deterministic local state, guest SSH metadata, tmux console lifecycle, clone/config scaffolds, malformed state, fake local runner lifecycle, and no remote hosts.")
+    print("PASS: VM create/start/shell/tmux/console/stop/list manages deterministic local state, guest SSH metadata, guest tmux config injection, tmux console lifecycle, clone/config scaffolds, malformed state, fake local runner lifecycle, and no remote hosts.")
 
 
 if __name__ == "__main__":

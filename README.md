@@ -111,17 +111,20 @@ The first VM lifecycle commands are conservative and host-local. `create` writes
 state, creates a per-VM work directory, optionally clones a separate repo, and
 renders a microVM config plus instance flake. `start` builds the local microVM
 runner, launches it in a dedicated tmux console session, waits for
-`ARGOS_VM_READY`, and records the PID/log/session paths. `shell` and `tmux` SSH
-into the guest over a local forwarded port, so new tmux windows live inside the
-VM. `console` remains the serial console fallback. `stop` terminates the
-recorded local process and keeps persistent instance data.
+`ARGOS_VM_READY`, and records the PID/log/session paths. `create` and `start`
+can read `[vm.guest_tmux]` from the selected Argos config and install either
+inline `config_text` or `config_path` contents as `/etc/tmux.conf` inside the
+guest. `shell` and `tmux` SSH into the guest over a local forwarded
+port, so new tmux windows live inside the VM. `console` remains the serial
+console fallback. `stop` terminates the recorded local process and keeps
+persistent instance data.
 
 ```sh
 argos vm list
 argos vm list --json
-argos vm create "Trade Feature" --repo /path/or/git-url --project trade
+argos vm create "Trade Feature" --repo /path/or/git-url --project trade --config ./config.local.toml
 argos vm create "Trade Feature" --repo /path/or/git-url --dry-run --json
-argos vm start trade-feature
+argos vm start trade-feature --config ./config.local.toml
 argos vm shell trade-feature
 argos vm tmux trade-feature
 argos vm console trade-feature
@@ -134,6 +137,17 @@ State records live under `$ARGOS_STATE_DIR/vms/*.json`, otherwise
 Generated instance scaffolds live under `instances/`, and default work clones
 under `workdirs/`. VM start/shell/tmux/console/stop is local-only for now.
 Remote placement, port-collision handling and project setup come later.
+
+Optional config:
+
+```toml
+[vm.guest_tmux]
+config_path = "/absolute/path/to/tmux.conf"
+# or:
+# config_text = """
+# set -g mouse on
+# """
+```
 
 ### MicroVM prototype
 
