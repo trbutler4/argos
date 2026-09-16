@@ -13,6 +13,7 @@ use std::{
 const NIXPKGS_URL: &str = "github:NixOS/nixpkgs/dc5d91f840324650bac8c379428c7037a416959a";
 const MICROVM_URL: &str = "github:microvm-nix/microvm.nix/614e9541186d724438edfd91c3bbc8474dd1b76e";
 const START_READY_TIMEOUT: Duration = Duration::from_secs(45);
+const SSH_KEYSCAN_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Serialize)]
 struct VmSnapshot {
@@ -823,13 +824,14 @@ fn run_guest_command(options: GuestCommandOptions) -> Result<ExitCode, VmError> 
         .map(PathBuf::from)
         .unwrap_or_else(|| state_root.join("instances").join(&record.id));
     let known_hosts = instance_dir.join("known_hosts");
+    refresh_guest_known_hosts(&record, &instance_dir)?;
     let destination = format!("{user}@{host}");
     let mut command = Command::new("ssh");
     command
         .arg("-tt")
         .args(["-p", &port.to_string()])
         .args(["-o", "BatchMode=yes"])
-        .args(["-o", "StrictHostKeyChecking=accept-new"])
+        .args(["-o", "StrictHostKeyChecking=yes"])
         .args([
             "-o",
             &format!("UserKnownHostsFile={}", known_hosts.display()),
@@ -887,6 +889,79 @@ fn wait_for_ready(session: &str, log_path: &Path, id: &str) -> Result<(), VmErro
         }
         thread::sleep(Duration::from_millis(200));
     }
+}
+
+fn refresh_guest_known_hosts(record: &VmRecord, instance_dir: &Path) -> Result<(), VmError> {
+    let host = record.ssh_host.as_deref().unwrap_or("127.0.0.1");
+    let port = record
+        .ssh_port
+        .unwrap_or_else(|| ssh_port_for_id(&record.id));
+    let known_hosts = instance_dir.join("known_hosts");
+    let start = SystemTime::now();
+
+    loop {
+        match scan_guest_host_key(host, port) {
+            Ok(keys) => {
+                fs::create_dir_all(instance_dir).map_err(|error| {
+                    state_error(format!(
+                        "cannot create VM instance directory {}: {error}",
+                        instance_dir.display()
+                    ))
+                })?;
+                let temp = known_hosts.with_extension("known_hosts.tmp");
+                fs::write(&temp, keys).map_err(|error| {
+                    state_error(format!(
+                        "cannot write temporary known_hosts {}: {error}",
+                        temp.display()
+                    ))
+                })?;
+                fs::rename(&temp, &known_hosts).map_err(|error| {
+                    state_error(format!(
+                        "cannot publish known_hosts {}: {error}",
+                        known_hosts.display()
+                    ))
+                })?;
+                return Ok(());
+            }
+            Err(error) => {
+                if start.elapsed().unwrap_or_else(|_| Duration::from_secs(0)) > SSH_KEYSCAN_TIMEOUT
+                {
+                    return Err(error);
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn scan_guest_host_key(host: &str, port: u16) -> Result<String, VmError> {
+    let output = Command::new("ssh-keyscan")
+        .args(["-T", "5", "-p", &port.to_string(), host])
+        .output()
+        .map_err(|error| VmError {
+            code: "ssh_error",
+            message: format!("cannot execute ssh-keyscan: {error}"),
+        })?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let keys = stdout
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with('#')
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if keys.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(VmError {
+            code: "ssh_error",
+            message: format!(
+                "could not scan guest SSH host key on {host}:{port}: {}",
+                stderr.trim()
+            ),
+        });
+    }
+    Ok(format!("{keys}\n"))
 }
 
 fn start_tmux_console(session: &str, instance_dir: &Path, script: &str) -> Result<(), VmError> {
@@ -1229,9 +1304,13 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
     enable = true;
     settings.PermitRootLogin = "prohibit-password";
     settings.PasswordAuthentication = false;
+    hostKeys = [
+      {{ path = "/var/lib/argos/ssh/ssh_host_ed25519_key"; type = "ed25519"; }}
+    ];
   }};
 
   environment.systemPackages = with pkgs; [ git tmux openssh ];
+  systemd.tmpfiles.rules = [ "d /var/lib/argos/ssh 0700 root root -" ];
 {tmux_block}
   systemd.services.argos-ready = {{
     description = "Argos VM readiness marker";
