@@ -78,7 +78,13 @@ def main():
         value = json.loads(created.stdout)
         assert value["dry_run"] is False
         assert Path(value["state_file"]).is_file()
-        assert Path(value["microvm_config"]).read_text().count("ARGOS_VM_READY") == 1
+        microvm_text = Path(value["microvm_config"]).read_text()
+        assert microvm_text.count("ARGOS_VM_READY") == 1
+        assert "services.openssh" in microvm_text
+        assert "forwardPorts" in microvm_text
+        assert value["record"]["ssh_host"] == "127.0.0.1"
+        assert value["record"]["ssh_user"] == "root"
+        assert isinstance(value["record"]["ssh_port"], int)
         assert (Path(value["microvm_config"]).parent / "flake.nix").is_file()
         assert (work_root / "trade-feature" / "repo" / ".git").is_dir()
         listed = json.loads(run(str(BINARY), "vm", "list", "--state-dir", str(create_state), "--json").stdout)
@@ -129,6 +135,10 @@ out.symlink_to(runner)
         assert run("tmux", "has-session", "-t", "argos-vm-trade-feature").returncode == 0
         console = run(str(BINARY), "vm", "console", "trade-feature", "--state-dir", str(create_state))
         assert console.returncode == 1 and "requires a terminal" in console.stderr
+        shell = run(str(BINARY), "vm", "shell", "trade-feature", "--state-dir", str(create_state))
+        assert shell.returncode == 1 and "requires a terminal" in shell.stderr
+        guest_tmux = run(str(BINARY), "vm", "tmux", "trade-feature", "--state-dir", str(create_state))
+        assert guest_tmux.returncode == 1 and "requires a terminal" in guest_tmux.stderr
         again = run(str(BINARY), "vm", "start", "trade-feature", "--state-dir", str(create_state), "--json", env=fake_env)
         assert again.returncode == 0, again.stderr
         assert json.loads(again.stdout)["already_running"] is True
@@ -146,7 +156,7 @@ out.symlink_to(runner)
         (vms / "bad.json").write_text(json.dumps(record("bad/slash")))
         bad = run(str(BINARY), "vm", "list", "--state-dir", str(state), "--json")
         assert bad.returncode == 1 and "invalid_state" in bad.stderr
-    print("PASS: VM create/start/console/stop/list manages deterministic local state, tmux console lifecycle, clone/config scaffolds, malformed state, fake local runner lifecycle, and no remote hosts.")
+    print("PASS: VM create/start/shell/tmux/console/stop/list manages deterministic local state, guest SSH metadata, tmux console lifecycle, clone/config scaffolds, malformed state, fake local runner lifecycle, and no remote hosts.")
 
 
 if __name__ == "__main__":

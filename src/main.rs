@@ -147,6 +147,18 @@ enum VmCommand {
         #[arg(long, value_name = "PATH")]
         state_dir: Option<std::path::PathBuf>,
     },
+    /// SSH into a local VM guest shell.
+    Shell {
+        id: String,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
+    },
+    /// SSH into a local VM guest and attach to its tmux session.
+    Tmux {
+        id: String,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
+    },
 }
 #[derive(Clone, Serialize)]
 pub(crate) struct Snapshot {
@@ -256,6 +268,16 @@ fn main() -> ExitCode {
             VmCommand::Console { id, state_dir } => {
                 vm::console(vm::ConsoleOptions { id, state_dir })
             }
+            VmCommand::Shell { id, state_dir } => vm::guest_command(vm::GuestCommandOptions {
+                id,
+                state_dir,
+                tmux: false,
+            }),
+            VmCommand::Tmux { id, state_dir } => vm::guest_command(vm::GuestCommandOptions {
+                id,
+                state_dir,
+                tmux: true,
+            }),
         },
     }
 }

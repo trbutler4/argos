@@ -53,6 +53,12 @@ struct VmRecord {
     #[serde(default)]
     console_session: Option<String>,
     #[serde(default)]
+    ssh_host: Option<String>,
+    #[serde(default)]
+    ssh_port: Option<u16>,
+    #[serde(default)]
+    ssh_user: Option<String>,
+    #[serde(default)]
     created_at_unix_ms: Option<u64>,
     #[serde(default)]
     updated_at_unix_ms: Option<u64>,
@@ -130,6 +136,12 @@ pub(crate) struct StopOptions {
 pub(crate) struct ConsoleOptions {
     pub(crate) id: String,
     pub(crate) state_dir: Option<PathBuf>,
+}
+
+pub(crate) struct GuestCommandOptions {
+    pub(crate) id: String,
+    pub(crate) state_dir: Option<PathBuf>,
+    pub(crate) tmux: bool,
 }
 
 pub(crate) fn list(json: bool, state_dir: Option<PathBuf>) -> ExitCode {
@@ -225,6 +237,17 @@ pub(crate) fn console(options: ConsoleOptions) -> ExitCode {
     }
 }
 
+pub(crate) fn guest_command(options: GuestCommandOptions) -> ExitCode {
+    match run_guest_command(options) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("error: {}: {}", error.code, error.message);
+            let code = if error.code == "invalid_args" { 2 } else { 1 };
+            ExitCode::from(code)
+        }
+    }
+}
+
 fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
     let state_root = state_root(options.state_dir.clone())?;
     let id = match &options.id {
@@ -260,6 +283,7 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
     };
     let workdir = work_root.join(&id);
     let repo_path = options.repo.as_ref().map(|_| workdir.join("repo"));
+    let ssh_port = ssh_port_for_id(&id);
     let record = VmRecord {
         schema_version: 1,
         id: id.clone(),
@@ -277,6 +301,9 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
         log_path: None,
         pid: None,
         console_session: None,
+        ssh_host: Some("127.0.0.1".into()),
+        ssh_port: Some(ssh_port),
+        ssh_user: Some("root".into()),
         created_at_unix_ms: Some(now),
         updated_at_unix_ms: Some(now),
         started_at_unix_ms: None,
@@ -414,6 +441,14 @@ fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
         .unwrap_or_else(|| instance_dir.join("microvm.nix"));
     let log_path = instance_dir.join("console.log");
     let console_session = console_session_name(&record.id);
+    let ssh_port = record
+        .ssh_port
+        .unwrap_or_else(|| ssh_port_for_id(&record.id));
+    let ssh_host = record
+        .ssh_host
+        .clone()
+        .unwrap_or_else(|| "127.0.0.1".into());
+    let ssh_user = record.ssh_user.clone().unwrap_or_else(|| "root".into());
 
     if let Some(pid) = record.pid
         && record.status == "running"
@@ -453,14 +488,15 @@ fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
             instance_dir.display()
         ))
     })?;
-    if !microvm_config.exists() {
-        fs::write(&microvm_config, render_microvm_config(&record)).map_err(|error| {
-            state_error(format!(
-                "cannot write microVM config {}: {error}",
-                microvm_config.display()
-            ))
-        })?;
-    }
+    record.ssh_host = Some(ssh_host.clone());
+    record.ssh_port = Some(ssh_port);
+    record.ssh_user = Some(ssh_user);
+    fs::write(&microvm_config, render_microvm_config(&record)).map_err(|error| {
+        state_error(format!(
+            "cannot write microVM config {}: {error}",
+            microvm_config.display()
+        ))
+    })?;
     if !flake_path.exists() {
         fs::write(&flake_path, render_instance_flake()).map_err(|error| {
             state_error(format!(
@@ -735,6 +771,74 @@ fn attach_console(options: ConsoleOptions) -> Result<ExitCode, VmError> {
             ExitCode::SUCCESS
         } else {
             ExitCode::from(1)
+        })
+    }
+}
+
+fn run_guest_command(options: GuestCommandOptions) -> Result<ExitCode, VmError> {
+    if !valid_id(&options.id) {
+        return Err(invalid_args(
+            "VM id must be 1-64 chars of letters, digits, '_' or '-'",
+        ));
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(VmError {
+            code: "shell_error",
+            message: "guest shell requires a terminal on stdin and stdout".into(),
+        });
+    }
+    let state_root = state_root(options.state_dir)?;
+    let state_file = state_root.join("vms").join(format!("{}.json", options.id));
+    let record = load_record(&state_file)?;
+    if record.status != "running" {
+        return Err(VmError {
+            code: "not_running",
+            message: format!("VM is not running: {}", record.id),
+        });
+    }
+    let host = record.ssh_host.as_deref().unwrap_or("127.0.0.1");
+    let user = record.ssh_user.as_deref().unwrap_or("root");
+    let port = record
+        .ssh_port
+        .unwrap_or_else(|| ssh_port_for_id(&record.id));
+    let instance_dir = record
+        .instance_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_root.join("instances").join(&record.id));
+    let known_hosts = instance_dir.join("known_hosts");
+    let destination = format!("{user}@{host}");
+    let mut command = Command::new("ssh");
+    command
+        .arg("-tt")
+        .args(["-p", &port.to_string()])
+        .args(["-o", "BatchMode=yes"])
+        .args(["-o", "StrictHostKeyChecking=accept-new"])
+        .args([
+            "-o",
+            &format!("UserKnownHostsFile={}", known_hosts.display()),
+        ])
+        .arg(destination);
+    if options.tmux {
+        command.arg("tmux new -A -s main");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let error = command.exec();
+        eprintln!("error: cannot execute ssh: {error}");
+        Ok(ExitCode::from(1))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status().map_err(|error| VmError {
+            code: "shell_error",
+            message: format!("cannot execute ssh: {error}"),
+        })?;
+        Ok(if status.success() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(status.code().unwrap_or(1) as u8)
         })
     }
 }
@@ -1033,6 +1137,15 @@ fn print_start(output: &VmStartOutput) {
     println!("  pid: {}", output.pid);
     println!("  runner: {}", output.runner_path);
     println!("  log: {}", output.log_path);
+    if let (Some(user), Some(host), Some(port)) = (
+        output.record.ssh_user.as_ref(),
+        output.record.ssh_host.as_ref(),
+        output.record.ssh_port,
+    ) {
+        println!("  ssh: {user}@{host}:{port}");
+        println!("  shell: argos vm shell {}", output.record.id);
+        println!("  tmux: argos vm tmux {}", output.record.id);
+    }
 }
 
 fn print_stop(output: &VmStopOutput) {
@@ -1078,16 +1191,29 @@ fn render_instance_flake() -> String {
 }
 
 fn render_microvm_config(record: &VmRecord) -> String {
+    let ssh_port = record
+        .ssh_port
+        .unwrap_or_else(|| ssh_port_for_id(&record.id));
+    let keys = authorized_keys_nix();
+    let mac = mac_for_id(&record.id);
     format!(
         r#"{{ pkgs, lib, ... }}:
 {{
   networking.hostName = {host};
+  networking.interfaces.eth0.useDHCP = true;
+  networking.firewall.allowedTCPPorts = [ 22 ];
   system.stateVersion = "25.11";
 
   users.users.root.hashedPassword = "!";
+  users.users.root.openssh.authorizedKeys.keys = {keys};
   services.getty.autologinUser = "root";
+  services.openssh = {{
+    enable = true;
+    settings.PermitRootLogin = "prohibit-password";
+    settings.PasswordAuthentication = false;
+  }};
 
-  environment.systemPackages = with pkgs; [ git tmux ];
+  environment.systemPackages = with pkgs; [ git tmux openssh ];
 
   systemd.services.argos-ready = {{
     description = "Argos VM readiness marker";
@@ -1105,6 +1231,12 @@ fn render_microvm_config(record: &VmRecord) -> String {
   microvm = {{
     hypervisor = "qemu";
     socket = "control.socket";
+    interfaces = [
+      {{ type = "user"; id = "eth0"; mac = {mac}; }}
+    ];
+    forwardPorts = [
+      {{ from = "host"; host.address = "127.0.0.1"; host.port = {ssh_port}; guest.port = 22; }}
+    ];
     volumes = [
       {{ mountPoint = "/var"; image = "var.img"; size = 1024; }}
     ];
@@ -1120,7 +1252,48 @@ fn render_microvm_config(record: &VmRecord) -> String {
 }}
 "#,
         host = serde_json::to_string(&format!("argos-{}", record.id)).unwrap(),
-        id = record.id
+        id = record.id,
+        keys = keys,
+        mac = serde_json::to_string(&mac).unwrap(),
+        ssh_port = ssh_port,
+    )
+}
+
+fn authorized_keys_nix() -> String {
+    let mut keys = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        for name in ["id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"] {
+            let path = Path::new(&home).join(".ssh").join(name);
+            if let Ok(text) = fs::read_to_string(path) {
+                let key = text.trim();
+                if !key.is_empty() {
+                    keys.push(serde_json::to_string(key).unwrap());
+                }
+            }
+        }
+    }
+    format!("[ {} ]", keys.join(" "))
+}
+
+fn ssh_port_for_id(id: &str) -> u16 {
+    let mut hash: u32 = 0;
+    for byte in id.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(byte as u32);
+    }
+    22000 + (hash % 20000) as u16
+}
+
+fn mac_for_id(id: &str) -> String {
+    let mut hash: u32 = 0xA6_90_05;
+    for byte in id.bytes() {
+        hash = hash.wrapping_mul(16777619) ^ byte as u32;
+    }
+    format!(
+        "02:7a:{:02x}:{:02x}:{:02x}:{:02x}",
+        (hash >> 24) & 0xff,
+        (hash >> 16) & 0xff,
+        (hash >> 8) & 0xff,
+        hash & 0xff
     )
 }
 
