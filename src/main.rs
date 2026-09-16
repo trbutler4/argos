@@ -11,6 +11,7 @@ mod config;
 mod host;
 mod tmux;
 mod tui;
+mod vm;
 
 #[derive(Parser, Debug)]
 #[command(name = "argos", version, about = "A command center for tmux work")]
@@ -66,6 +67,11 @@ enum Command {
         #[command(subcommand)]
         command: HostsCommand,
     },
+    /// Manage Argos VM state on this host.
+    Vm {
+        #[command(subcommand)]
+        command: VmCommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -87,6 +93,17 @@ enum HostsCommand {
         config: Option<std::path::PathBuf>,
         #[arg(long, value_name = "ID")]
         host: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum VmCommand {
+    /// List VM records in this host's Argos state directory.
+    List {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
     },
 }
 #[derive(Clone, Serialize)]
@@ -152,6 +169,9 @@ fn main() -> ExitCode {
                 config,
                 host: host_filter,
             } => host::hosts_status(json, config, host_filter),
+        },
+        Command::Vm { command } => match command {
+            VmCommand::List { json, state_dir } => vm::list(json, state_dir),
         },
     }
 }

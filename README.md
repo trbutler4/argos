@@ -105,6 +105,23 @@ argos hosts status --config ./config.local.toml --json
 availability and whether `/dev/kvm` is accessible. `argos hosts status` runs that helper locally
 or through configured SSH aliases so the controller can check VM hosts before asking them to create or start VMs.
 
+### VM state scaffold
+
+The first VM lifecycle slice is read-only. It lists local VM records from the
+host's Argos state directory without creating directories, starting guests or
+modifying host services:
+
+```sh
+argos vm list
+argos vm list --json
+argos vm list --state-dir /absolute/test/state --json
+```
+
+State records live under `$ARGOS_STATE_DIR/vms/*.json`, otherwise
+`$XDG_STATE_HOME/argos/vms/*.json` or `~/.local/state/argos/vms/*.json`.
+This establishes the JSON envelope and state-file shape that later `vm create`,
+`vm start` and `vm stop` commands will update.
+
 ### MicroVM prototype
 
 A minimal microvm.nix/QEMU runner is available for backend exploration on
@@ -165,6 +182,7 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked
 python3 tests/host_status.py
+python3 tests/vm_list.py
 python3 tests/local_tmux.py
 python3 tests/config_cli.py
 python3 tests/remote_ssh.py

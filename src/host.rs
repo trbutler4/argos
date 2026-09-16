@@ -412,7 +412,7 @@ fn capabilities() -> Capabilities {
     }
 }
 
-fn state_root() -> PathBuf {
+pub(crate) fn state_root() -> PathBuf {
     if let Some(path) = absolute_env_path("ARGOS_STATE_DIR") {
         return path;
     }
