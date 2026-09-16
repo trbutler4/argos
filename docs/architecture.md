@@ -49,9 +49,10 @@ Choose a Rust TUI framework for M0b instead of building a terminal renderer. No
 browser/desktop management UI is planned; opening a project app in a browser remains
 a separate action. Machine/session access works over SSH without Hyprland.
 
-Proposed TUI layout: machine/session list, selected-item details, search/filter and a
-contextual action/help bar. M0b needs keyboard navigation, live reachability
-status, readable errors and a clear VM tmux entry flow. Support terminal resizing
+Proposed TUI layout: machine list with separate session and VM groups, selected-item
+details, search/filter and a contextual action/help bar. M0b needs keyboard
+navigation, live reachability status, readable errors and a clear sessions-layer
+entry flow. Support terminal resizing
 and a usable compact layout. Specific widgets and keybindings remain design choices.
 A slow host probe must not block input or redraws. The TUI may run in a tmux window
 or be launched in a sufficiently large popup, but the popup is not the product itself.
@@ -91,8 +92,8 @@ from attachable entry points:
 - `argos sessions attach host:HOST:SESSION` enters unmanaged host tmux and must not
   imply Argos owns that session's lifecycle.
 - Host tmux may wrap the terminal, but it is not the project session owner for VM work.
-- The TUI should eventually show host and VM session rows and dispatch through the
-  same sessions layer.
+- The TUI shows host session rows and VM rows separately and dispatches Enter through
+  the same sessions layer.
 - Keep an easy route back to the hub/picker and label VM sessions with their host/project.
 - Disconnecting or closing a tmux client must not kill sessions or restart shells.
 

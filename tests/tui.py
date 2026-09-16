@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Real PTY smoke test for the read-only Argos TUI."""
+"""Real PTY smoke test for the Argos TUI."""
 import fcntl
+import json
 import os
 from pathlib import Path
 import pty
@@ -31,12 +32,23 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="argos-tui-", dir=os.environ.get("XDG_RUNTIME_DIR")) as temp:
         root = Path(temp)
+        state = root / "state"
+        (state / "vms").mkdir(parents=True)
+        host = run("hostname", env=env).stdout.strip()
+        (state / "vms" / "test.json").write_text(json.dumps({
+            "schema_version": 1,
+            "id": "test",
+            "name": "Test VM",
+            "status": "running",
+            "host": host,
+        }) + "\n")
+        env["ARGOS_STATE_DIR"] = str(state)
+
         sock = root / "tmux.sock"
         tmux = ["tmux", "-u", "-S", str(sock), "-f", "/dev/null"]
         name = "tui target α trailing "
         created = run(*tmux, "new-session", "-d", "-s", name, "/bin/sh", env=env)
         assert created.returncode == 0, created.stderr
-        session_id = run(*tmux, "display-message", "-p", "-t", name, "#{session_id}", env=env).stdout.strip()
 
         def terminal():
             master, slave = pty.openpty()
@@ -66,10 +78,46 @@ def main():
             while time.monotonic() < deadline:
                 drain(master, output)
                 text = output.decode(errors="ignore")
-                if all(token in text for token in ("Argos", "tui", "target", "refresh", "quit", "read-only")):
+                if all(token in text for token in ("Argos", "sessions", "vms", "Test", "VM", "Enter", "attach", "refresh", "quit")):
                     return
                 time.sleep(0.05)
             raise AssertionError(output.decode(errors="ignore"))
+
+        def clients():
+            out = run(*tmux, "list-clients", "-F", "#{client_pid}|#{session_name}", env=env)
+            if out.returncode != 0:
+                return {}
+            return dict(line.split("|", 1) for line in out.stdout.splitlines() if "|" in line)
+
+        process, master, slave, original, output = terminal()
+        try:
+            wait_rendered(master, output)
+            os.write(master, b"\r")
+            deadline = time.monotonic() + 4
+            while time.monotonic() < deadline:
+                drain(master, output)
+                if clients().get(str(process.pid)) == name:
+                    break
+                time.sleep(0.05)
+            assert clients().get(str(process.pid)) == name, "Enter did not attach selected host tmux session"
+            os.write(master, b"\x02d")
+            deadline = time.monotonic() + 4
+            while time.monotonic() < deadline and process.poll() is None:
+                drain(master, output)
+                time.sleep(0.05)
+            assert process.poll() is not None, "TUI attach did not exit after tmux detach"
+            assert process.returncode == 0
+            assert termios.tcgetattr(slave) == original, "terminal attributes not restored"
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            os.close(master)
+            os.close(slave)
 
         process, master, slave, original, output = terminal()
         try:
@@ -94,8 +142,8 @@ def main():
             os.close(slave)
 
         run(*tmux, "kill-server", env=env)
-    print("PASS: real PTY TUI renders sessions, handles navigation/refresh/quit,")
-    print("      remains read-only, and restores terminal mode.")
+    print("PASS: real PTY TUI renders host sessions and VMs, handles navigation/refresh/quit,")
+    print("      exits before attach handoff, and restores terminal mode.")
 
 
 if __name__ == "__main__":

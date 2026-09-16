@@ -15,56 +15,56 @@ const MICROVM_URL: &str = "github:microvm-nix/microvm.nix/614e9541186d724438edfd
 const START_READY_TIMEOUT: Duration = Duration::from_secs(45);
 const SSH_KEYSCAN_TIMEOUT: Duration = Duration::from_secs(15);
 
-#[derive(Debug, Serialize)]
-struct VmSnapshot {
-    schema_version: u32,
-    observed_at_unix_ms: u64,
-    state_root: String,
-    vms: Vec<VmRecord>,
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct VmSnapshot {
+    pub(crate) schema_version: u32,
+    pub(crate) observed_at_unix_ms: u64,
+    pub(crate) state_root: String,
+    pub(crate) vms: Vec<VmRecord>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct VmRecord {
-    schema_version: u32,
-    id: String,
-    name: String,
-    status: String,
-    host: String,
+pub(crate) struct VmRecord {
+    pub(crate) schema_version: u32,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) status: String,
+    pub(crate) host: String,
     #[serde(default)]
-    project: Option<String>,
+    pub(crate) project: Option<String>,
     #[serde(default)]
-    source_repo: Option<String>,
+    pub(crate) source_repo: Option<String>,
     #[serde(default)]
-    repo_path: Option<String>,
+    pub(crate) repo_path: Option<String>,
     #[serde(default)]
-    workdir: Option<String>,
+    pub(crate) workdir: Option<String>,
     #[serde(default)]
-    instance_dir: Option<String>,
+    pub(crate) instance_dir: Option<String>,
     #[serde(default)]
-    flake_path: Option<String>,
+    pub(crate) flake_path: Option<String>,
     #[serde(default)]
-    microvm_config: Option<String>,
+    pub(crate) microvm_config: Option<String>,
     #[serde(default)]
-    runner_path: Option<String>,
+    pub(crate) runner_path: Option<String>,
     #[serde(default)]
-    log_path: Option<String>,
+    pub(crate) log_path: Option<String>,
     #[serde(default)]
-    pid: Option<u32>,
+    pub(crate) pid: Option<u32>,
     #[serde(default)]
-    console_session: Option<String>,
+    pub(crate) console_session: Option<String>,
     #[serde(default)]
-    ssh_host: Option<String>,
+    pub(crate) ssh_host: Option<String>,
     #[serde(default)]
-    ssh_port: Option<u16>,
+    pub(crate) ssh_port: Option<u16>,
     #[serde(default)]
-    ssh_user: Option<String>,
+    pub(crate) ssh_user: Option<String>,
     #[serde(default)]
-    created_at_unix_ms: Option<u64>,
+    pub(crate) created_at_unix_ms: Option<u64>,
     #[serde(default)]
-    updated_at_unix_ms: Option<u64>,
+    pub(crate) updated_at_unix_ms: Option<u64>,
     #[serde(default)]
-    started_at_unix_ms: Option<u64>,
+    pub(crate) started_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,7 +75,7 @@ struct VmCreateOutput {
     state_file: String,
     instance_dir: String,
     workdir: String,
-    repo_path: Option<String>,
+    pub(crate) repo_path: Option<String>,
     microvm_config: String,
     record: VmRecord,
 }
@@ -99,7 +99,7 @@ struct VmStopOutput {
     schema_version: u32,
     state_root: String,
     state_file: String,
-    pid: Option<u32>,
+    pub(crate) pid: Option<u32>,
     already_stopped: bool,
     record: VmRecord,
 }
@@ -140,6 +140,11 @@ pub(crate) struct GuestCommandOptions {
     pub(crate) id: String,
     pub(crate) state_dir: Option<PathBuf>,
     pub(crate) tmux: bool,
+}
+
+pub(crate) fn snapshot(state_dir: Option<PathBuf>) -> Result<VmSnapshot, String> {
+    let state_root = state_root(state_dir).map_err(|error| error.message)?;
+    load_snapshot(&state_root).map_err(|error| format!("{}: {}", error.code, error.message))
 }
 
 pub(crate) fn list(json: bool, state_dir: Option<PathBuf>) -> ExitCode {

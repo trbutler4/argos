@@ -78,20 +78,21 @@ unchanged panes. Real loopback SSH tests exercise remote host tmux attach from a
 plain terminal and from inside local tmux. Unit tests cover target parsing for VM
 and host session forms.
 
-### Slice 4: first simple read-only TUI
+### Slice 4: simple TUI with session and VM entry
 
 Implemented interface: `argos tui` with the same config/host/local/socket selection
-as `list`. It renders a full-screen session browser backed by the same snapshot
-discovery path as `list`, with `j`/`k` and arrow navigation, `r` refresh, and
-`q`/Esc/Ctrl-C quit. It is read-only and does not hand off to host tmux.
+as `list`. It renders hosts with separate `sessions` and `vms` groups, backed by
+the tmux snapshot plus local VM state. It supports `j`/`k` and arrow navigation,
+`r` refresh, `q`/Esc/Ctrl-C quit, and Enter attach handoff through the sessions
+layer. Host tmux rows attach as host sessions; VM rows attach as `vm:<id>`.
 
 Verified: Rust tests, fmt, Clippy, local/config/real-SSH integration checks,
 `tests/tui.py` against a real PTY, and packaged Nix TUI smoke checks all passed.
-The TUI PTY test verifies visible rendered session content, navigation/refresh/quit
-input, non-TTY refusal, and terminal-mode restoration.
+The TUI PTY test verifies visible rendered host sessions and VMs, navigation,
+refresh/quit input, non-TTY refusal, attach handoff, and terminal-mode restoration.
 
-Boundaries: this is not the VM dashboard yet. VM rows and Enter-to-`vm tmux` handoff
-belong to a focused future slice.
+Boundaries: this is still not a rich VM dashboard. It does not start/stop VMs or
+show service readiness.
 
 ### Slice 5: microvm.nix runner-package spike
 
@@ -184,11 +185,11 @@ program to consume.
 **Deliverable:** a full-screen Rust TUI using the M0a command/output contract.
 
 1. Choose a Rust TUI framework. Add `argos tui` with keyboard navigation,
-   search/filter, selected-session details, host status and contextual help.
+   host status, separate session/VM groups and contextual help.
 2. Invoke CLI read commands asynchronously with `--json`; render structured data and
    errors rather than scraping terminal tables. Keep filtering/selection in the TUI,
    but all host operations in the CLI. Handle schema mismatch and failed subprocesses.
-3. Future TUI entry should hand the terminal to `argos sessions attach` and
+3. TUI entry should hand the terminal to `argos sessions attach` and
    restore/redraw afterward. Test inside and outside tmux; guest tmux must not be treated as captured JSON output.
 4. Add optional launch bindings only when they preserve the existing prefix, session
    picker, clipboard setup and navigation bindings.

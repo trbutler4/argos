@@ -7,8 +7,9 @@ Read README.md, docs/architecture.md and docs/plan.md before implementation.
 
 The Rust CLI implements local/SSH host tmux discovery, `sessions attach` for
 attachable entry points, JSON output, strict private TOML inventory, host
-filtering, deadlines, a read-only `tui` session browser, and a read-only `host
-status` helper for installed host instances. VMs are isolated environments:
+filtering, deadlines, a `tui` browser that separates host sessions from VMs and
+hands Enter to the sessions layer, and a read-only `host status` helper for
+installed host instances. VMs are isolated environments:
 `vm list` reads local VM state, `vm create` writes local state/workdir scaffolds
 and optional guest tmux config from `[vm.guest_tmux]`, `vm start`/`vm stop` run
 the local microVM process from that state, and `vm shell`/`vm tmux` SSH into the

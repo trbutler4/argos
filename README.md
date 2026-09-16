@@ -12,8 +12,9 @@ Status: **remote sessions plus local VM lifecycle**. Local and SSH tmux listing
 use a private machine inventory, bounded concurrency and per-host deadlines.
 `argos sessions attach` enters either an unmanaged host tmux session or a VM-owned
 tmux session (`vm:<id>`). `argos vm ...` creates, starts, stops and configures
-isolated environments. The TUI is a read-only browser while the VM workflow takes
-shape. Local microVMs can be created, started, stopped, entered over SSH, and
+isolated environments. The TUI groups each host into sessions and VMs, and Enter
+attaches through the sessions layer. Local microVMs can be created, started,
+stopped, entered over SSH, and
 given a project workspace at `/workspace/repo` with `nix develop` support. No
 remote installation or provisioning is performed.
 
@@ -47,10 +48,10 @@ argos tui --config /path/inventory.toml
 argos tui --config ./config.local.toml
 ```
 
-The first TUI slice stays simple and read-only. It shows discovered hosts and
-sessions, supports `j`/`k` or arrow navigation, `r` to refresh, and `q` to quit.
-Interactive launch remains separate from the TUI for now and goes through
-`argos sessions attach`.
+The TUI stays simple. It shows each discovered host with separate `sessions` and
+`vms` groups, supports `j`/`k` or arrow navigation, `r` to refresh, `q` to quit,
+and Enter to attach. Host tmux rows attach as host sessions; VM rows attach as
+`vm:<id>` sessions through the same sessions layer.
 
 For development, build and run directly without a NixOS rebuild:
 
@@ -341,8 +342,8 @@ argos env destroy <machine/environment>  # explicit destructive confirmation
 ```
 
 Local/SSH `list`, JSON output, filtering, `sessions attach` for host and VM
-sessions, the first read-only TUI browser, local VM lifecycle and VM-owned tmux
-entry are implemented today. Other commands
+sessions, the first TUI browser with session/VM attach handoff, local VM lifecycle
+and VM-owned tmux entry are implemented today. Other commands
 are proposed, not installed commands. `start` boots a stopped VM.
 It does **not** restore process memory. Detach/switch to keep agents and backends
 running; stopping a VM ends its processes while retaining its disk.
