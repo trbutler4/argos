@@ -116,13 +116,19 @@ out.symlink_to(runner)
         fake_nix.chmod(fake_nix.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         fake_env = os.environ.copy()
         fake_env["PATH"] = f"{fake_bin}:{fake_env['PATH']}"
+        run("tmux", "kill-session", "-t", "argos-vm-trade-feature")
         started = run(str(BINARY), "vm", "start", "trade-feature", "--state-dir", str(create_state), "--json", env=fake_env)
         assert started.returncode == 0, started.stderr
         start_value = json.loads(started.stdout)
         assert start_value["already_running"] is False
         assert start_value["record"]["status"] == "running"
         assert start_value["record"]["pid"] == start_value["pid"]
+        assert start_value["console_session"] == "argos-vm-trade-feature"
+        assert start_value["record"]["console_session"] == "argos-vm-trade-feature"
         assert Path(start_value["log_path"]).read_text().count("ARGOS_VM_READY id=trade-feature") == 1
+        assert run("tmux", "has-session", "-t", "argos-vm-trade-feature").returncode == 0
+        console = run(str(BINARY), "vm", "console", "trade-feature", "--state-dir", str(create_state))
+        assert console.returncode == 1 and "requires a terminal" in console.stderr
         again = run(str(BINARY), "vm", "start", "trade-feature", "--state-dir", str(create_state), "--json", env=fake_env)
         assert again.returncode == 0, again.stderr
         assert json.loads(again.stdout)["already_running"] is True
@@ -132,6 +138,7 @@ out.symlink_to(runner)
         assert stop_value["already_stopped"] is False
         assert stop_value["record"]["status"] == "stopped"
         assert stop_value["record"]["pid"] is None
+        assert run("tmux", "has-session", "-t", "argos-vm-trade-feature").returncode != 0
         stopped_again = run(str(BINARY), "vm", "stop", "trade-feature", "--state-dir", str(create_state), "--json")
         assert stopped_again.returncode == 0, stopped_again.stderr
         assert json.loads(stopped_again.stdout)["already_stopped"] is True
@@ -139,7 +146,7 @@ out.symlink_to(runner)
         (vms / "bad.json").write_text(json.dumps(record("bad/slash")))
         bad = run(str(BINARY), "vm", "list", "--state-dir", str(state), "--json")
         assert bad.returncode == 1 and "invalid_state" in bad.stderr
-    print("PASS: VM create/start/stop/list manages deterministic local state, clone/config scaffolds, malformed state, fake local runner lifecycle, and no remote hosts.")
+    print("PASS: VM create/start/console/stop/list manages deterministic local state, tmux console lifecycle, clone/config scaffolds, malformed state, fake local runner lifecycle, and no remote hosts.")
 
 
 if __name__ == "__main__":

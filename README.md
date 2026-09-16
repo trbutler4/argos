@@ -110,9 +110,10 @@ or through configured SSH aliases so the controller can check VM hosts before as
 The first VM lifecycle commands are conservative and host-local. `create` writes
 state, creates a per-VM work directory, optionally clones a separate repo, and
 renders a microVM config plus instance flake. `start` builds the local microVM
-runner, launches it from the instance directory, waits for `ARGOS_VM_READY`, and
-records the PID/log path. `stop` terminates the recorded local process and keeps
-persistent instance data.
+runner, launches it in a dedicated tmux console session, waits for
+`ARGOS_VM_READY`, and records the PID/log/session paths. `console` switches or
+attaches to that tmux session. `stop` terminates the recorded local process and
+keeps persistent instance data.
 
 ```sh
 argos vm list
@@ -120,6 +121,7 @@ argos vm list --json
 argos vm create "Trade Feature" --repo /path/or/git-url --project trade
 argos vm create "Trade Feature" --repo /path/or/git-url --dry-run --json
 argos vm start trade-feature
+argos vm console trade-feature
 argos vm stop trade-feature
 argos vm list --state-dir /absolute/test/state --json
 ```
@@ -127,7 +129,7 @@ argos vm list --state-dir /absolute/test/state --json
 State records live under `$ARGOS_STATE_DIR/vms/*.json`, otherwise
 `$XDG_STATE_HOME/argos/vms/*.json` or `~/.local/state/argos/vms/*.json`.
 Generated instance scaffolds live under `instances/`, and default work clones
-under `workdirs/`. VM start/stop is local-only for now. Remote placement,
+under `workdirs/`. VM start/console/stop is local-only for now. Remote placement,
 networking, SSH into guests and project setup come later.
 
 ### MicroVM prototype

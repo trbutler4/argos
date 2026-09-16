@@ -8,7 +8,7 @@ Read README.md, docs/architecture.md and docs/plan.md before implementation.
 The Rust CLI implements local/SSH `list`, JSON output, strict private TOML
 inventory, host filtering, deadlines, local/SSH `attach`, a simple `tui` session
 browser with Enter-to-attach handoff, and a read-only `host status` helper for
-installed host instances. `vm list` reads local VM state, `vm create` writes local state/workdir scaffolds, and `vm start`/`vm stop` run the local microVM process from that state. A first microvm.nix QEMU runner-package prototype builds
+installed host instances. `vm list` reads local VM state, `vm create` writes local state/workdir scaffolds, `vm start`/`vm stop` run the local microVM process from that state, and `vm console` attaches to the tmux-backed VM console session. A first microvm.nix QEMU runner-package prototype builds
 and boots, but VM SSH, project setup and `env` commands are not implemented.
 `--local`/`--socket` bypass implicit inventory. `attach` supports exact local/SSH
 session targeting, safe same-server client switching, and remote connection windows

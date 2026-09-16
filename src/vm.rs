@@ -1,7 +1,8 @@
 use crate::host;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, OpenOptions},
+    fs,
+    io::IsTerminal,
     io::Read,
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
@@ -50,6 +51,8 @@ struct VmRecord {
     #[serde(default)]
     pid: Option<u32>,
     #[serde(default)]
+    console_session: Option<String>,
+    #[serde(default)]
     created_at_unix_ms: Option<u64>,
     #[serde(default)]
     updated_at_unix_ms: Option<u64>,
@@ -79,6 +82,7 @@ struct VmStartOutput {
     runner_path: String,
     log_path: String,
     pid: u32,
+    console_session: String,
     already_running: bool,
     record: VmRecord,
 }
@@ -121,6 +125,11 @@ pub(crate) struct StopOptions {
     pub(crate) id: String,
     pub(crate) state_dir: Option<PathBuf>,
     pub(crate) json: bool,
+}
+
+pub(crate) struct ConsoleOptions {
+    pub(crate) id: String,
+    pub(crate) state_dir: Option<PathBuf>,
 }
 
 pub(crate) fn list(json: bool, state_dir: Option<PathBuf>) -> ExitCode {
@@ -205,6 +214,17 @@ pub(crate) fn stop(options: StopOptions) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+pub(crate) fn console(options: ConsoleOptions) -> ExitCode {
+    match attach_console(options) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("error: {}: {}", error.code, error.message);
+            let code = if error.code == "invalid_args" { 2 } else { 1 };
+            ExitCode::from(code)
+        }
+    }
+}
+
 fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
     let state_root = state_root(options.state_dir.clone())?;
     let id = match &options.id {
@@ -256,6 +276,7 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
         runner_path: None,
         log_path: None,
         pid: None,
+        console_session: None,
         created_at_unix_ms: Some(now),
         updated_at_unix_ms: Some(now),
         started_at_unix_ms: None,
@@ -392,10 +413,11 @@ fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
         .map(PathBuf::from)
         .unwrap_or_else(|| instance_dir.join("microvm.nix"));
     let log_path = instance_dir.join("console.log");
+    let console_session = console_session_name(&record.id);
 
     if let Some(pid) = record.pid
         && record.status == "running"
-        && process_alive(pid)
+        && (process_alive(pid) || tmux_session_exists(&console_session))
     {
         let runner_path = record
             .runner_path
@@ -412,10 +434,17 @@ fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
                 .clone()
                 .unwrap_or_else(|| log_path.display().to_string()),
             pid,
+            console_session: record
+                .console_session
+                .clone()
+                .unwrap_or_else(|| console_session.clone()),
             already_running: true,
             record,
         };
         return Ok(output);
+    }
+    if tmux_session_exists(&console_session) {
+        kill_tmux_session(&console_session);
     }
 
     fs::create_dir_all(&instance_dir).map_err(|error| {
@@ -448,26 +477,14 @@ fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
             run_bin.display()
         )));
     }
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|error| state_error(format!("cannot open log {}: {error}", log_path.display())))?;
-    let log_err = log
-        .try_clone()
-        .map_err(|error| state_error(format!("cannot clone VM log handle: {error}")))?;
-    let mut child = Command::new(&run_bin)
-        .current_dir(&instance_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err))
-        .spawn()
-        .map_err(|error| VmError {
-            code: "start_error",
-            message: format!("cannot start microVM runner {}: {error}", run_bin.display()),
-        })?;
-    let pid = child.id();
-    wait_for_ready(&mut child, &log_path, &record.id)?;
+    let script = format!(
+        "exec {} 2>&1 | tee -a {}",
+        shell_quote(&run_bin.display().to_string()),
+        shell_quote(&log_path.display().to_string())
+    );
+    start_tmux_console(&console_session, &instance_dir, &script)?;
+    wait_for_ready(&console_session, &log_path, &record.id)?;
+    let pid = tmux_session_pid(&console_session)?;
 
     let now = now_ms();
     record.status = "running".into();
@@ -477,6 +494,7 @@ fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
     record.runner_path = Some(runner_path.display().to_string());
     record.log_path = Some(log_path.display().to_string());
     record.pid = Some(pid);
+    record.console_session = Some(console_session.clone());
     record.started_at_unix_ms = Some(now);
     record.updated_at_unix_ms = Some(now);
     write_record(&state_file, &record)?;
@@ -489,6 +507,7 @@ fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
         runner_path: runner_path.display().to_string(),
         log_path: log_path.display().to_string(),
         pid,
+        console_session,
         already_running: false,
         record,
     })
@@ -504,7 +523,12 @@ fn stop_vm(options: StopOptions) -> Result<VmStopOutput, VmError> {
     let state_file = state_root.join("vms").join(format!("{}.json", options.id));
     let mut record = load_record(&state_file)?;
     let pid = record.pid;
-    let already_stopped = pid.is_none_or(|pid| !process_alive(pid));
+    let console_session = record
+        .console_session
+        .clone()
+        .unwrap_or_else(|| console_session_name(&record.id));
+    let already_stopped =
+        pid.is_none_or(|pid| !process_alive(pid)) && !tmux_session_exists(&console_session);
     if !already_stopped && let Some(pid) = pid {
         graceful_shutdown(&record);
         if process_alive(pid) {
@@ -516,9 +540,13 @@ fn stop_vm(options: StopOptions) -> Result<VmStopOutput, VmError> {
             wait_for_exit(pid, Duration::from_secs(2));
         }
     }
+    if tmux_session_exists(&console_session) {
+        kill_tmux_session(&console_session);
+    }
     let now = now_ms();
     record.status = "stopped".into();
     record.pid = None;
+    record.console_session = Some(console_session);
     record.updated_at_unix_ms = Some(now);
     write_record(&state_file, &record)?;
     Ok(VmStopOutput {
@@ -646,11 +674,72 @@ fn build_runner(instance_dir: &Path) -> Result<PathBuf, VmError> {
     Ok(out_link)
 }
 
-fn wait_for_ready(
-    child: &mut std::process::Child,
-    log_path: &Path,
-    id: &str,
-) -> Result<(), VmError> {
+fn attach_console(options: ConsoleOptions) -> Result<ExitCode, VmError> {
+    if !valid_id(&options.id) {
+        return Err(invalid_args(
+            "VM id must be 1-64 chars of letters, digits, '_' or '-'",
+        ));
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(VmError {
+            code: "console_error",
+            message: "console requires a terminal on stdin and stdout".into(),
+        });
+    }
+    let state_root = state_root(options.state_dir)?;
+    let state_file = state_root.join("vms").join(format!("{}.json", options.id));
+    let record = load_record(&state_file)?;
+    let session = record
+        .console_session
+        .clone()
+        .unwrap_or_else(|| console_session_name(&record.id));
+    if record.status != "running" || !tmux_session_exists(&session) {
+        return Err(VmError {
+            code: "not_running",
+            message: format!(
+                "VM is not running with an attachable console: {}",
+                record.id
+            ),
+        });
+    }
+    if std::env::var("TMUX").is_ok_and(|value| !value.is_empty()) {
+        let status = Command::new("tmux")
+            .args(["switch-client", "-t", &session])
+            .status()
+            .map_err(|error| VmError {
+                code: "console_error",
+                message: format!("cannot execute tmux switch-client: {error}"),
+            })?;
+        return Ok(if status.success() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        });
+    }
+    let mut command = Command::new("tmux");
+    command.args(["-u", "-N", "attach-session", "-t", &session]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let error = command.exec();
+        eprintln!("error: cannot execute tmux attach-session: {error}");
+        Ok(ExitCode::from(1))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status().map_err(|error| VmError {
+            code: "console_error",
+            message: format!("cannot execute tmux attach-session: {error}"),
+        })?;
+        Ok(if status.success() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        })
+    }
+}
+
+fn wait_for_ready(session: &str, log_path: &Path, id: &str) -> Result<(), VmError> {
     let marker = format!("ARGOS_VM_READY id={id}");
     let start = SystemTime::now();
     loop {
@@ -661,13 +750,10 @@ fn wait_for_ready(
                 return Ok(());
             }
         }
-        if let Some(status) = child.try_wait().map_err(|error| VmError {
-            code: "start_error",
-            message: format!("cannot poll VM process: {error}"),
-        })? {
+        if !tmux_session_exists(session) {
             return Err(VmError {
                 code: "start_error",
-                message: format!("microVM exited before readiness marker with status {status}"),
+                message: "microVM console session exited before readiness marker".into(),
             });
         }
         if start.elapsed().unwrap_or_else(|_| Duration::from_secs(0)) > START_READY_TIMEOUT {
@@ -681,6 +767,77 @@ fn wait_for_ready(
         }
         thread::sleep(Duration::from_millis(200));
     }
+}
+
+fn start_tmux_console(session: &str, instance_dir: &Path, script: &str) -> Result<(), VmError> {
+    let status = Command::new("tmux")
+        .args(["new-session", "-d", "-s", session, "-c"])
+        .arg(instance_dir)
+        .args(["sh", "-lc", script])
+        .status()
+        .map_err(|error| VmError {
+            code: "start_error",
+            message: format!("cannot execute tmux new-session: {error}"),
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(VmError {
+            code: "start_error",
+            message: format!("tmux new-session failed with status {status}"),
+        })
+    }
+}
+
+fn tmux_session_exists(session: &str) -> bool {
+    Command::new("tmux")
+        .args(["has-session", "-t", session])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn tmux_session_pid(session: &str) -> Result<u32, VmError> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "-t", session, "#{pane_pid}"])
+        .output()
+        .map_err(|error| VmError {
+            code: "start_error",
+            message: format!("cannot execute tmux display-message: {error}"),
+        })?;
+    if !output.status.success() {
+        return Err(VmError {
+            code: "start_error",
+            message: format!(
+                "tmux display-message failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .map_err(|error| VmError {
+            code: "start_error",
+            message: format!("tmux returned invalid pane pid: {error}"),
+        })
+}
+
+fn kill_tmux_session(session: &str) {
+    let _ = Command::new("tmux")
+        .args(["kill-session", "-t", session])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+fn console_session_name(id: &str) -> String {
+    format!("argos-vm-{id}")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn process_alive(pid: u32) -> bool {

@@ -141,6 +141,12 @@ enum VmCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Attach to a local VM's console session.
+    Console {
+        id: String,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
+    },
 }
 #[derive(Clone, Serialize)]
 pub(crate) struct Snapshot {
@@ -247,6 +253,9 @@ fn main() -> ExitCode {
                 state_dir,
                 json,
             }),
+            VmCommand::Console { id, state_dir } => {
+                vm::console(vm::ConsoleOptions { id, state_dir })
+            }
         },
     }
 }
