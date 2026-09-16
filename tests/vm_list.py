@@ -103,8 +103,15 @@ def main():
         microvm_text = Path(value["microvm_config"]).read_text()
         assert microvm_text.count("ARGOS_VM_READY") == 1
         assert "services.openssh" in microvm_text
+        assert 'nix.settings.experimental-features = [ "nix-command" "flakes" ];' in microvm_text
         assert 'path = "/var/lib/argos/ssh/ssh_host_ed25519_key"' in microvm_text
+        assert 'directory = /workspace/repo' in microvm_text
         assert "forwardPorts" in microvm_text
+        assert "mem = 4096" in microvm_text
+        assert 'writableStoreOverlay = "/nix/.rw-store"' in microvm_text
+        assert 'image = "nix-store-overlay.img"' in microvm_text
+        assert 'mountPoint = "/workspace"' in microvm_text
+        assert f'source = "{work_root}/trade-feature"' in microvm_text
         assert 'environment.etc."argos/tmux.conf".source = ./guest-tmux.conf' in microvm_text
         assert (Path(value["microvm_config"]).parent / "guest-tmux.conf").read_text() == tmux_conf.read_text()
         assert value["record"]["ssh_host"] == "127.0.0.1"

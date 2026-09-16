@@ -114,10 +114,12 @@ runner, launches it in a dedicated tmux console session, waits for
 `ARGOS_VM_READY`, and records the PID/log/session paths. `create` and `start`
 can read `[vm.guest_tmux]` from the selected Argos config and install either
 inline `config_text` or `config_path` contents as `/etc/tmux.conf` inside the
-guest. `shell` and `tmux` SSH into the guest over a local forwarded
-port, so new tmux windows live inside the VM. `console` remains the serial
-console fallback. `stop` terminates the recorded local process and keeps
-persistent instance data.
+guest. The VM mounts the per-VM work directory at `/workspace`, so a cloned
+repo is available at `/workspace/repo`. `shell` and `tmux` start there by
+default. Guests include flakes, a writable Nix store overlay, and enough default
+memory for small `nix develop` workflows. `console` remains the serial console
+fallback. `stop` terminates the recorded local process and keeps persistent
+instance data.
 
 ```sh
 argos vm list

@@ -837,8 +837,15 @@ fn run_guest_command(options: GuestCommandOptions) -> Result<ExitCode, VmError> 
             &format!("UserKnownHostsFile={}", known_hosts.display()),
         ])
         .arg(destination);
+    let workspace_prefix = "cd /workspace/repo 2>/dev/null || cd /workspace 2>/dev/null || cd";
     if options.tmux {
-        command.arg("if [ -f /etc/tmux.conf ]; then exec tmux -f /etc/tmux.conf new -A -s main; else exec tmux new -A -s main; fi");
+        command.arg(format!(
+            "{workspace_prefix}; if [ -f /etc/tmux.conf ]; then exec tmux -f /etc/tmux.conf new -A -s main; else exec tmux new -A -s main; fi"
+        ));
+    } else {
+        command.arg(format!(
+            "{workspace_prefix}; exec ${{SHELL:-/run/current-system/sw/bin/sh}} -l"
+        ));
     }
     #[cfg(unix)]
     {
@@ -1289,12 +1296,14 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
     let mac = mac_for_id(&record.id);
     let tmux_block = render_tmux_config_block(tmux_config);
     let tmux_store_shares = render_tmux_store_shares(tmux_config);
+    let workspace_share = render_workspace_share(record);
     format!(
-        r#"{{ pkgs, lib, ... }}:
+        r#"{{ pkgs, lib, config, ... }}:
 {{
   networking.hostName = {host};
   networking.interfaces.eth0.useDHCP = true;
   networking.firewall.allowedTCPPorts = [ 22 ];
+  nix.settings.experimental-features = [ "nix-command" "flakes" ];
   system.stateVersion = "25.11";
 
   users.users.root.hashedPassword = "!";
@@ -1310,6 +1319,11 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
   }};
 
   environment.systemPackages = with pkgs; [ git tmux openssh ];
+  environment.etc."gitconfig".text = ''
+    [safe]
+      directory = /workspace/repo
+      directory = /workspace
+  '';
   systemd.tmpfiles.rules = [ "d /var/lib/argos/ssh 0700 root root -" ];
 {tmux_block}
   systemd.services.argos-ready = {{
@@ -1327,7 +1341,10 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
 
   microvm = {{
     hypervisor = "qemu";
+    vcpu = 4;
+    mem = 4096;
     socket = "control.socket";
+    writableStoreOverlay = "/nix/.rw-store";
     interfaces = [
       {{ type = "user"; id = "eth0"; mac = {mac}; }}
     ];
@@ -1336,6 +1353,7 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
     ];
     volumes = [
       {{ mountPoint = "/var"; image = "var.img"; size = 1024; }}
+      {{ mountPoint = config.microvm.writableStoreOverlay; image = "nix-store-overlay.img"; size = 8192; }}
     ];
     shares = [
       {{
@@ -1344,7 +1362,7 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
         source = "/nix/store";
         mountPoint = "/nix/.ro-store";
       }}
-{tmux_store_shares}    ];
+{tmux_store_shares}{workspace_share}    ];
   }};
 }}
 "#,
@@ -1355,6 +1373,23 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
         ssh_port = ssh_port,
         tmux_block = tmux_block,
         tmux_store_shares = tmux_store_shares,
+        workspace_share = workspace_share,
+    )
+}
+
+fn render_workspace_share(record: &VmRecord) -> String {
+    let Some(workdir) = record.workdir.as_deref() else {
+        return String::new();
+    };
+    format!(
+        r#"      {{
+        proto = "9p";
+        tag = "workspace";
+        source = {source};
+        mountPoint = "/workspace";
+      }}
+"#,
+        source = serde_json::to_string(workdir).unwrap(),
     )
 }
 
