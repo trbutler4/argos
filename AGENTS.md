@@ -57,7 +57,7 @@ implementation milestones complete from documentation checks.
 
 ## Public repository boundary
 
-- Keep machine-specific inventory out of Git, normally at
+- Keep machine-specific Argos config out of Git, normally at
   `$XDG_CONFIG_HOME/argos/config.toml` (default `~/.config/argos/config.toml`).
   A gitignored checkout-local `config.local.toml` may be selected explicitly for
   development. Commit only generic examples.

@@ -62,9 +62,10 @@ nix develop --command cargo build --locked
 ./target/debug/argos tui --config ./config.local.toml
 ```
 
-`config.local.toml` is gitignored and directly editable. Pass it explicitly to keep
-development independent of the installed config. Building this binary does not
-update your installed version or NixOS input pin.
+`config.local.toml` is gitignored and directly editable. `--config` always means
+"Argos config", not "host-only config". You may pass it to any command that
+accepts it; each command reads the sections it needs and may ignore the rest.
+Building this binary does not update your installed version or NixOS input pin.
 
 ### Sessions and environments
 
@@ -86,7 +87,8 @@ argos sessions attach vm:trade-feature
 
 Host sessions are unmanaged: Argos can list and attach, but it does not own their
 lifecycle. VM sessions are backed by the VM record and enter guest-owned tmux over
-SSH, equivalent to `argos vm tmux ID`.
+SSH, equivalent to `argos vm tmux ID`. Passing `--config` to a VM session attach is
+valid even when that attach only needs VM state today.
 
 ### Installed host helper
 

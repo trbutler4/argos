@@ -68,8 +68,9 @@ Implemented interface: `argos sessions list` for explicit host-tmux discovery an
 `argos sessions attach TARGET` for terminal entry. Targets are typed at the edge:
 `host:<host>:<session>` or `SESSION --host HOST` routes to unmanaged host tmux,
 while `vm:<id>` routes to guest-owned tmux, equivalent to `argos vm tmux ID`.
-This keeps VMs as lifecycle-managed environments and sessions as attachable entry
-points.
+`--config` remains Argos config for both target kinds; VM session attach accepts it
+and reads only the sections it needs. This keeps VMs as lifecycle-managed
+environments and sessions as attachable entry points.
 
 Verified: real PTY local tmux tests exercise exact name/ID selection, same-server
 switching, ambiguous/cross-server refusal, detach, terminal restoration and

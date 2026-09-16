@@ -217,9 +217,11 @@ an explicit later option with firewall/ACL decisions.
 
 ## 7. State, operations and safety
 
-Static machine inventory lives at `$XDG_CONFIG_HOME/argos/config.toml`
+Static Argos config lives at `$XDG_CONFIG_HOME/argos/config.toml`
 (default `~/.config/argos/config.toml`), outside the public repository and
-optionally rendered by Home Manager. Active machine schema is in `examples/config.toml`.
+optionally rendered by Home Manager. It is not host-only: commands accept an
+explicit `--config` as Argos config, then read only the sections they need. Active
+machine schema is in `examples/config.toml`.
 Future project/VM defaults remain proposed in `examples/environment-proposal.toml`.
 The host owns managed environment state; clients cache observations, not authority.
 Two dashboards must be able to inspect the same environment without registry sync.

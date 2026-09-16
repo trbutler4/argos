@@ -136,8 +136,14 @@ fn parse_attach_spec(target: &str, explicit_host: Option<&str>) -> Result<Attach
 }
 
 fn attach_vm_session(id: String, options: AttachOptions) -> ExitCode {
-    if options.socket.is_some() || options.config_path.is_some() || options.local {
-        eprintln!("error: vm:<id> session targets only accept --state-dir");
+    if options.socket.is_some() || options.local {
+        eprintln!("error: vm:<id> session targets only accept --config and --state-dir");
+        return ExitCode::from(2);
+    }
+    if let Some(config_path) = options.config_path
+        && let Err(error) = config::load(&config_path)
+    {
+        eprintln!("error: {error}");
         return ExitCode::from(2);
     }
     vm::guest_command(vm::GuestCommandOptions {
