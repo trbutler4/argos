@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 
@@ -78,6 +79,7 @@ def main():
         assert value["dry_run"] is False
         assert Path(value["state_file"]).is_file()
         assert Path(value["microvm_config"]).read_text().count("ARGOS_VM_READY") == 1
+        assert (Path(value["microvm_config"]).parent / "flake.nix").is_file()
         assert (work_root / "trade-feature" / "repo" / ".git").is_dir()
         listed = json.loads(run(str(BINARY), "vm", "list", "--state-dir", str(create_state), "--json").stdout)
         assert [vm["id"] for vm in listed["vms"]] == ["trade-feature"]
@@ -87,10 +89,57 @@ def main():
         bad_args = run(str(BINARY), "vm", "create", "bad", "--id", "bad/slash", "--state-dir", str(create_state), "--json")
         assert bad_args.returncode == 2
 
+        fake_bin = root / "fake-bin"
+        fake_store = root / "fake-store"
+        fake_bin.mkdir()
+        fake_nix = fake_bin / "nix"
+        fake_nix.write_text(f"""#!/usr/bin/env python3
+import os
+import pathlib
+import stat
+import sys
+
+args = sys.argv[1:]
+if len(args) < 4 or args[:2] != ["build", ".#runner"] or "--out-link" not in args:
+    print("unexpected fake nix args", args, file=sys.stderr)
+    sys.exit(9)
+out = pathlib.Path(args[args.index("--out-link") + 1])
+runner = pathlib.Path({str(fake_store)!r}) / out.parent.name
+(runner / "bin").mkdir(parents=True, exist_ok=True)
+run = runner / "bin" / "microvm-run"
+run.write_text('''#!/bin/sh\nid=$(basename "$PWD")\necho "ARGOS_VM_READY id=$id host=fake"\nexec sleep 60\n''')
+run.chmod(run.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+if out.exists() or out.is_symlink():
+    out.unlink()
+out.symlink_to(runner)
+""")
+        fake_nix.chmod(fake_nix.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        fake_env = os.environ.copy()
+        fake_env["PATH"] = f"{fake_bin}:{fake_env['PATH']}"
+        started = run(str(BINARY), "vm", "start", "trade-feature", "--state-dir", str(create_state), "--json", env=fake_env)
+        assert started.returncode == 0, started.stderr
+        start_value = json.loads(started.stdout)
+        assert start_value["already_running"] is False
+        assert start_value["record"]["status"] == "running"
+        assert start_value["record"]["pid"] == start_value["pid"]
+        assert Path(start_value["log_path"]).read_text().count("ARGOS_VM_READY id=trade-feature") == 1
+        again = run(str(BINARY), "vm", "start", "trade-feature", "--state-dir", str(create_state), "--json", env=fake_env)
+        assert again.returncode == 0, again.stderr
+        assert json.loads(again.stdout)["already_running"] is True
+        stopped = run(str(BINARY), "vm", "stop", "trade-feature", "--state-dir", str(create_state), "--json")
+        assert stopped.returncode == 0, stopped.stderr
+        stop_value = json.loads(stopped.stdout)
+        assert stop_value["already_stopped"] is False
+        assert stop_value["record"]["status"] == "stopped"
+        assert stop_value["record"]["pid"] is None
+        stopped_again = run(str(BINARY), "vm", "stop", "trade-feature", "--state-dir", str(create_state), "--json")
+        assert stopped_again.returncode == 0, stopped_again.stderr
+        assert json.loads(stopped_again.stdout)["already_stopped"] is True
+
         (vms / "bad.json").write_text(json.dumps(record("bad/slash")))
         bad = run(str(BINARY), "vm", "list", "--state-dir", str(state), "--json")
         assert bad.returncode == 1 and "invalid_state" in bad.stderr
-    print("PASS: VM create/list manages deterministic local state, clone/config scaffolds, malformed state, and never starts guests.")
+    print("PASS: VM create/start/stop/list manages deterministic local state, clone/config scaffolds, malformed state, fake local runner lifecycle, and no remote hosts.")
 
 
 if __name__ == "__main__":

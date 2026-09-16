@@ -151,21 +151,25 @@ Boundaries: no lifecycle mutation, host registry, SSH-to-guest, or long-running
 supervised operation exists yet. The command only proves the installed binary can
 report whether the host is ready for those future steps.
 
-### Slice 8: local VM state create/list scaffold
+### Slice 8: local VM create/list/start/stop scaffold
 
-Implemented interface: `argos vm list [--json] [--state-dir PATH]` and
-`argos vm create NAME [--repo REPO] [--dry-run]`. This is conservative host-local
-VM lifecycle scaffolding. `list` reads versioned JSON VM records from the host
-Argos state directory under `vms/*.json`, returns a stable schema versioned
-snapshot, sorts records by ID, treats missing state as an empty list, and rejects
-malformed state. `create` writes one VM record, creates per-VM instance/work
-directories, optionally performs a separate `git clone`, and renders a microVM
-config for a future start command.
+Implemented interface: `argos vm list [--json] [--state-dir PATH]`,
+`argos vm create NAME [--repo REPO] [--dry-run]`, `argos vm start ID`, and
+`argos vm stop ID`. This is conservative host-local VM lifecycle scaffolding.
+`list` reads versioned JSON VM records from the host Argos state directory under
+`vms/*.json`, returns a stable schema versioned snapshot, sorts records by ID,
+treats missing state as an empty list, and rejects malformed state. `create`
+writes one VM record, creates per-VM instance/work directories, optionally
+performs a separate `git clone`, and renders a microVM config plus instance
+flake. `start` builds the runner from that instance flake, launches it in the
+instance directory, waits for the guest readiness marker, and records PID/log
+metadata. `stop` terminates the recorded local process and keeps persistent
+instance data.
 
-Boundaries: no VM start/stop, no microvm process supervision, no SSH into guests,
-no systemd units and no state migration exist in this slice. Future lifecycle
-commands should consume this state shape after they have successfully completed
-their host-side action.
+Boundaries: no remote VM placement, no SSH into guests, no systemd user units,
+no guest networking contract, and no state migration exist in this slice. Future
+lifecycle commands should consume this state shape after they have successfully
+completed their host-side action.
 
 Release boundaries: **M0a (CLI) is the first usable release** without VM/browser
 features. **M0b adds the full-screen TUI over CLI JSON output.**

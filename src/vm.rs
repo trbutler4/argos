@@ -1,11 +1,17 @@
 use crate::host;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    io::Read,
     path::{Path, PathBuf},
-    process::{Command, ExitCode},
-    time::{SystemTime, UNIX_EPOCH},
+    process::{Command, ExitCode, Stdio},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+const NIXPKGS_URL: &str = "github:NixOS/nixpkgs/dc5d91f840324650bac8c379428c7037a416959a";
+const MICROVM_URL: &str = "github:microvm-nix/microvm.nix/614e9541186d724438edfd91c3bbc8474dd1b76e";
+const START_READY_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Serialize)]
 struct VmSnapshot {
@@ -32,11 +38,23 @@ struct VmRecord {
     #[serde(default)]
     workdir: Option<String>,
     #[serde(default)]
+    instance_dir: Option<String>,
+    #[serde(default)]
+    flake_path: Option<String>,
+    #[serde(default)]
     microvm_config: Option<String>,
+    #[serde(default)]
+    runner_path: Option<String>,
+    #[serde(default)]
+    log_path: Option<String>,
+    #[serde(default)]
+    pid: Option<u32>,
     #[serde(default)]
     created_at_unix_ms: Option<u64>,
     #[serde(default)]
     updated_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    started_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,6 +67,29 @@ struct VmCreateOutput {
     workdir: String,
     repo_path: Option<String>,
     microvm_config: String,
+    record: VmRecord,
+}
+
+#[derive(Debug, Serialize)]
+struct VmStartOutput {
+    schema_version: u32,
+    state_root: String,
+    state_file: String,
+    instance_dir: String,
+    runner_path: String,
+    log_path: String,
+    pid: u32,
+    already_running: bool,
+    record: VmRecord,
+}
+
+#[derive(Debug, Serialize)]
+struct VmStopOutput {
+    schema_version: u32,
+    state_root: String,
+    state_file: String,
+    pid: Option<u32>,
+    already_stopped: bool,
     record: VmRecord,
 }
 
@@ -67,6 +108,18 @@ pub(crate) struct CreateOptions {
     pub(crate) state_dir: Option<PathBuf>,
     pub(crate) work_root: Option<PathBuf>,
     pub(crate) dry_run: bool,
+    pub(crate) json: bool,
+}
+
+pub(crate) struct StartOptions {
+    pub(crate) id: String,
+    pub(crate) state_dir: Option<PathBuf>,
+    pub(crate) json: bool,
+}
+
+pub(crate) struct StopOptions {
+    pub(crate) id: String,
+    pub(crate) state_dir: Option<PathBuf>,
     pub(crate) json: bool,
 }
 
@@ -116,6 +169,42 @@ pub(crate) fn create(options: CreateOptions) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+pub(crate) fn start(options: StartOptions) -> ExitCode {
+    let json = options.json;
+    let output = match start_vm(options) {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("error: {}: {}", error.code, error.message);
+            let code = if error.code == "invalid_args" { 2 } else { 1 };
+            return ExitCode::from(code);
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string(&output).unwrap());
+    } else {
+        print_start(&output);
+    }
+    ExitCode::SUCCESS
+}
+
+pub(crate) fn stop(options: StopOptions) -> ExitCode {
+    let json = options.json;
+    let output = match stop_vm(options) {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("error: {}: {}", error.code, error.message);
+            let code = if error.code == "invalid_args" { 2 } else { 1 };
+            return ExitCode::from(code);
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string(&output).unwrap());
+    } else {
+        print_stop(&output);
+    }
+    ExitCode::SUCCESS
+}
+
 fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
     let state_root = state_root(options.state_dir.clone())?;
     let id = match &options.id {
@@ -140,6 +229,7 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
         });
     }
     let instance_dir = state_root.join("instances").join(&id);
+    let flake_path = instance_dir.join("flake.nix");
     let microvm_config = instance_dir.join("microvm.nix");
     let work_root = match &options.work_root {
         Some(path) if !path.is_absolute() => {
@@ -160,9 +250,15 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
         source_repo: options.repo.clone(),
         repo_path: repo_path.as_ref().map(|path| path.display().to_string()),
         workdir: Some(workdir.display().to_string()),
+        instance_dir: Some(instance_dir.display().to_string()),
+        flake_path: Some(flake_path.display().to_string()),
         microvm_config: Some(microvm_config.display().to_string()),
+        runner_path: None,
+        log_path: None,
+        pid: None,
         created_at_unix_ms: Some(now),
         updated_at_unix_ms: Some(now),
+        started_at_unix_ms: None,
     };
     validate_record(&record, &state_file)?;
     Ok(VmCreateOutput {
@@ -242,6 +338,18 @@ fn create_vm_state(output: &VmCreateOutput) -> Result<(), VmError> {
             output.microvm_config
         ))
     })?;
+    let flake_path = output
+        .record
+        .flake_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| instance_dir.join("flake.nix"));
+    fs::write(&flake_path, render_instance_flake()).map_err(|error| {
+        state_error(format!(
+            "cannot write microVM flake {}: {error}",
+            flake_path.display()
+        ))
+    })?;
     let json = serde_json::to_string_pretty(&output.record).unwrap();
     let temp = state_file.with_extension("json.tmp");
     fs::write(&temp, format!("{json}\n")).map_err(|error| {
@@ -257,6 +365,170 @@ fn create_vm_state(output: &VmCreateOutput) -> Result<(), VmError> {
         ))
     })?;
     Ok(())
+}
+
+fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
+    if !valid_id(&options.id) {
+        return Err(invalid_args(
+            "VM id must be 1-64 chars of letters, digits, '_' or '-'",
+        ));
+    }
+    let state_root = state_root(options.state_dir)?;
+    let state_file = state_root.join("vms").join(format!("{}.json", options.id));
+    let mut record = load_record(&state_file)?;
+    let instance_dir = record
+        .instance_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_root.join("instances").join(&record.id));
+    let flake_path = record
+        .flake_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| instance_dir.join("flake.nix"));
+    let microvm_config = record
+        .microvm_config
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| instance_dir.join("microvm.nix"));
+    let log_path = instance_dir.join("console.log");
+
+    if let Some(pid) = record.pid
+        && record.status == "running"
+        && process_alive(pid)
+    {
+        let runner_path = record
+            .runner_path
+            .clone()
+            .unwrap_or_else(|| instance_dir.join("runner").display().to_string());
+        let output = VmStartOutput {
+            schema_version: 1,
+            state_root: state_root.display().to_string(),
+            state_file: state_file.display().to_string(),
+            instance_dir: instance_dir.display().to_string(),
+            runner_path,
+            log_path: record
+                .log_path
+                .clone()
+                .unwrap_or_else(|| log_path.display().to_string()),
+            pid,
+            already_running: true,
+            record,
+        };
+        return Ok(output);
+    }
+
+    fs::create_dir_all(&instance_dir).map_err(|error| {
+        state_error(format!(
+            "cannot create VM instance directory {}: {error}",
+            instance_dir.display()
+        ))
+    })?;
+    if !microvm_config.exists() {
+        fs::write(&microvm_config, render_microvm_config(&record)).map_err(|error| {
+            state_error(format!(
+                "cannot write microVM config {}: {error}",
+                microvm_config.display()
+            ))
+        })?;
+    }
+    if !flake_path.exists() {
+        fs::write(&flake_path, render_instance_flake()).map_err(|error| {
+            state_error(format!(
+                "cannot write microVM flake {}: {error}",
+                flake_path.display()
+            ))
+        })?;
+    }
+    let runner_path = build_runner(&instance_dir)?;
+    let run_bin = runner_path.join("bin").join("microvm-run");
+    if !run_bin.exists() {
+        return Err(state_error(format!(
+            "microVM runner is missing {}",
+            run_bin.display()
+        )));
+    }
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|error| state_error(format!("cannot open log {}: {error}", log_path.display())))?;
+    let log_err = log
+        .try_clone()
+        .map_err(|error| state_error(format!("cannot clone VM log handle: {error}")))?;
+    let mut child = Command::new(&run_bin)
+        .current_dir(&instance_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err))
+        .spawn()
+        .map_err(|error| VmError {
+            code: "start_error",
+            message: format!("cannot start microVM runner {}: {error}", run_bin.display()),
+        })?;
+    let pid = child.id();
+    wait_for_ready(&mut child, &log_path, &record.id)?;
+
+    let now = now_ms();
+    record.status = "running".into();
+    record.instance_dir = Some(instance_dir.display().to_string());
+    record.flake_path = Some(flake_path.display().to_string());
+    record.microvm_config = Some(microvm_config.display().to_string());
+    record.runner_path = Some(runner_path.display().to_string());
+    record.log_path = Some(log_path.display().to_string());
+    record.pid = Some(pid);
+    record.started_at_unix_ms = Some(now);
+    record.updated_at_unix_ms = Some(now);
+    write_record(&state_file, &record)?;
+
+    Ok(VmStartOutput {
+        schema_version: 1,
+        state_root: state_root.display().to_string(),
+        state_file: state_file.display().to_string(),
+        instance_dir: instance_dir.display().to_string(),
+        runner_path: runner_path.display().to_string(),
+        log_path: log_path.display().to_string(),
+        pid,
+        already_running: false,
+        record,
+    })
+}
+
+fn stop_vm(options: StopOptions) -> Result<VmStopOutput, VmError> {
+    if !valid_id(&options.id) {
+        return Err(invalid_args(
+            "VM id must be 1-64 chars of letters, digits, '_' or '-'",
+        ));
+    }
+    let state_root = state_root(options.state_dir)?;
+    let state_file = state_root.join("vms").join(format!("{}.json", options.id));
+    let mut record = load_record(&state_file)?;
+    let pid = record.pid;
+    let already_stopped = pid.is_none_or(|pid| !process_alive(pid));
+    if !already_stopped && let Some(pid) = pid {
+        graceful_shutdown(&record);
+        if process_alive(pid) {
+            signal_pid(pid, "TERM")?;
+            wait_for_exit(pid, Duration::from_secs(5));
+        }
+        if process_alive(pid) {
+            signal_pid(pid, "KILL")?;
+            wait_for_exit(pid, Duration::from_secs(2));
+        }
+    }
+    let now = now_ms();
+    record.status = "stopped".into();
+    record.pid = None;
+    record.updated_at_unix_ms = Some(now);
+    write_record(&state_file, &record)?;
+    Ok(VmStopOutput {
+        schema_version: 1,
+        state_root: state_root.display().to_string(),
+        state_file: state_file.display().to_string(),
+        pid,
+        already_stopped,
+        record,
+    })
 }
 
 fn state_root(override_dir: Option<PathBuf>) -> Result<PathBuf, VmError> {
@@ -314,6 +586,159 @@ fn load_vms(dir: &Path) -> Result<Vec<VmRecord>, VmError> {
         records.push(record);
     }
     Ok(records)
+}
+
+fn load_record(path: &Path) -> Result<VmRecord, VmError> {
+    let text = fs::read_to_string(path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => VmError {
+            code: "not_found",
+            message: format!("VM state does not exist: {}", path.display()),
+        },
+        _ => state_error(format!("cannot read VM state {}: {error}", path.display())),
+    })?;
+    let record: VmRecord = serde_json::from_str(&text).map_err(|error| VmError {
+        code: "invalid_state",
+        message: format!("invalid VM state {}: {error}", path.display()),
+    })?;
+    validate_record(&record, path)?;
+    Ok(record)
+}
+
+fn write_record(path: &Path, record: &VmRecord) -> Result<(), VmError> {
+    validate_record(record, path)?;
+    let json = serde_json::to_string_pretty(record).unwrap();
+    let temp = path.with_extension("json.tmp");
+    fs::write(&temp, format!("{json}\n")).map_err(|error| {
+        state_error(format!(
+            "cannot write temporary VM state {}: {error}",
+            temp.display()
+        ))
+    })?;
+    fs::rename(&temp, path).map_err(|error| {
+        state_error(format!(
+            "cannot publish VM state {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn build_runner(instance_dir: &Path) -> Result<PathBuf, VmError> {
+    let out_link = instance_dir.join("runner");
+    let status = Command::new("nix")
+        .args([
+            "build",
+            ".#runner",
+            "--out-link",
+            out_link.to_str().unwrap_or_default(),
+        ])
+        .current_dir(instance_dir)
+        .status()
+        .map_err(|error| VmError {
+            code: "nix_error",
+            message: format!("cannot execute nix build: {error}"),
+        })?;
+    if !status.success() {
+        return Err(VmError {
+            code: "nix_error",
+            message: format!("nix build failed with status {status}"),
+        });
+    }
+    Ok(out_link)
+}
+
+fn wait_for_ready(
+    child: &mut std::process::Child,
+    log_path: &Path,
+    id: &str,
+) -> Result<(), VmError> {
+    let marker = format!("ARGOS_VM_READY id={id}");
+    let start = SystemTime::now();
+    loop {
+        if let Ok(mut file) = fs::File::open(log_path) {
+            let mut text = String::new();
+            let _ = file.read_to_string(&mut text);
+            if text.contains(&marker) {
+                return Ok(());
+            }
+        }
+        if let Some(status) = child.try_wait().map_err(|error| VmError {
+            code: "start_error",
+            message: format!("cannot poll VM process: {error}"),
+        })? {
+            return Err(VmError {
+                code: "start_error",
+                message: format!("microVM exited before readiness marker with status {status}"),
+            });
+        }
+        if start.elapsed().unwrap_or_else(|_| Duration::from_secs(0)) > START_READY_TIMEOUT {
+            return Err(VmError {
+                code: "start_error",
+                message: format!(
+                    "timed out waiting for readiness marker in {}",
+                    log_path.display()
+                ),
+            });
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn process_alive(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+fn graceful_shutdown(record: &VmRecord) {
+    let Some(runner_path) = &record.runner_path else {
+        return;
+    };
+    let Some(instance_dir) = &record.instance_dir else {
+        return;
+    };
+    let shutdown = Path::new(runner_path).join("bin").join("microvm-shutdown");
+    if !shutdown.exists() {
+        return;
+    }
+    let Ok(mut child) = Command::new(shutdown)
+        .current_dir(instance_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    let start = SystemTime::now();
+    while child.try_wait().ok().flatten().is_none()
+        && start.elapsed().unwrap_or_else(|_| Duration::from_secs(0)) < Duration::from_secs(10)
+    {
+        thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+}
+
+fn signal_pid(pid: u32, signal: &str) -> Result<(), VmError> {
+    let status = Command::new("kill")
+        .args([format!("-{signal}"), pid.to_string()])
+        .status()
+        .map_err(|error| VmError {
+            code: "stop_error",
+            message: format!("cannot execute kill: {error}"),
+        })?;
+    if !status.success() && process_alive(pid) {
+        return Err(VmError {
+            code: "stop_error",
+            message: format!("kill -{signal} {pid} failed with status {status}"),
+        });
+    }
+    Ok(())
+}
+
+fn wait_for_exit(pid: u32, timeout: Duration) {
+    let start = SystemTime::now();
+    while process_alive(pid) && start.elapsed().unwrap_or_else(|_| Duration::from_secs(0)) < timeout
+    {
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn validate_record(record: &VmRecord, path: &Path) -> Result<(), VmError> {
@@ -435,6 +860,64 @@ fn print_create(output: &VmCreateOutput) {
     if output.dry_run {
         println!("  dry-run: no files written");
     }
+}
+
+fn print_start(output: &VmStartOutput) {
+    println!(
+        "{} {}",
+        if output.already_running {
+            "already running"
+        } else {
+            "started"
+        },
+        serde_json::to_string(&output.record.name).unwrap()
+    );
+    println!("  id: {}", output.record.id);
+    println!("  pid: {}", output.pid);
+    println!("  runner: {}", output.runner_path);
+    println!("  log: {}", output.log_path);
+}
+
+fn print_stop(output: &VmStopOutput) {
+    println!(
+        "{} {}",
+        if output.already_stopped {
+            "already stopped"
+        } else {
+            "stopped"
+        },
+        serde_json::to_string(&output.record.name).unwrap()
+    );
+    println!("  id: {}", output.record.id);
+    if let Some(pid) = output.pid {
+        println!("  previous pid: {pid}");
+    }
+}
+
+fn render_instance_flake() -> String {
+    format!(
+        r#"{{
+  description = "Argos generated microVM instance";
+
+  inputs.nixpkgs.url = {nixpkgs};
+  inputs.microvm = {{
+    url = {microvm};
+    inputs.nixpkgs.follows = "nixpkgs";
+  }};
+
+  outputs = {{ nixpkgs, microvm, ... }}:
+    let system = "x86_64-linux";
+    in {{
+      packages.${{system}}.runner = (nixpkgs.lib.nixosSystem {{
+        inherit system;
+        modules = [ microvm.nixosModules.microvm ./microvm.nix ];
+      }}).config.microvm.declaredRunner;
+    }};
+}}
+"#,
+        nixpkgs = serde_json::to_string(NIXPKGS_URL).unwrap(),
+        microvm = serde_json::to_string(MICROVM_URL).unwrap(),
+    )
 }
 
 fn render_microvm_config(record: &VmRecord) -> String {

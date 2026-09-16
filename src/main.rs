@@ -125,6 +125,22 @@ enum VmCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Build and start a local VM by id.
+    Start {
+        id: String,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop a local VM by id.
+    Stop {
+        id: String,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 #[derive(Clone, Serialize)]
 pub(crate) struct Snapshot {
@@ -211,6 +227,24 @@ fn main() -> ExitCode {
                 state_dir,
                 work_root,
                 dry_run,
+                json,
+            }),
+            VmCommand::Start {
+                id,
+                state_dir,
+                json,
+            } => vm::start(vm::StartOptions {
+                id,
+                state_dir,
+                json,
+            }),
+            VmCommand::Stop {
+                id,
+                state_dir,
+                json,
+            } => vm::stop(vm::StopOptions {
+                id,
+                state_dir,
                 json,
             }),
         },
