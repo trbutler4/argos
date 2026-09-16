@@ -153,6 +153,30 @@ enum VmCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Create if needed, start, then attach to the VM-owned tmux session.
+    Up {
+        name: String,
+        #[arg(long, value_name = "ID")]
+        id: Option<String>,
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        work_root: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        config: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        profile: Option<std::path::PathBuf>,
+        #[arg(long)]
+        no_attach: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Show one VM record, including workspace and exposed links.
     Show {
         id: String,
@@ -307,6 +331,31 @@ fn main() -> ExitCode {
             } => vm::show(vm::ShowOptions {
                 id,
                 state_dir,
+                json,
+            }),
+            VmCommand::Up {
+                name,
+                id,
+                repo,
+                project,
+                host,
+                state_dir,
+                work_root,
+                config,
+                profile,
+                no_attach,
+                json,
+            } => vm::up(vm::UpOptions {
+                name,
+                id,
+                repo,
+                project,
+                host,
+                state_dir,
+                work_root,
+                config,
+                profile,
+                no_attach,
                 json,
             }),
             VmCommand::Start {

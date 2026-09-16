@@ -123,14 +123,18 @@ guest. The VM mounts the per-VM work directory at `/workspace`, so a cloned
 repo is available at `/workspace/repo` by default. `shell` and `tmux` start
 there by default. Guests include flakes, a writable Nix store overlay, and enough
 default memory for small `nix develop` workflows. `show` reports one VM record,
-including package intent and `http://127.0.0.1:<host-port>` links. `stop`
-terminates the recorded local process and keeps persistent instance data.
+including package intent and `http://127.0.0.1:<host-port>` links. `up` is the
+normal repo workflow: it creates the VM if missing, starts it if needed, then
+hands off to the VM-owned tmux session. `stop` terminates the recorded local
+process and keeps persistent instance data.
 
 ```sh
 argos vm list
 argos vm list --json
 argos vm create "Trade Feature" --repo /path/or/git-url --project trade --config ./config.local.toml --profile ./.argos.toml
 argos vm create "Trade Feature" --repo /path/or/git-url --dry-run --json
+argos vm up "Trade Feature" --repo . --config ./config.local.toml
+argos vm up "Trade Feature" --repo . --no-attach
 argos vm show trade-feature
 argos vm show trade-feature --json
 argos vm start trade-feature --config ./config.local.toml

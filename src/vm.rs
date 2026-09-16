@@ -173,6 +173,13 @@ struct VmStopOutput {
     record: VmRecord,
 }
 
+#[derive(Debug, Serialize)]
+struct VmUpOutput {
+    schema_version: u32,
+    created: bool,
+    start: VmStartOutput,
+}
+
 #[derive(Debug)]
 struct VmError {
     code: &'static str,
@@ -203,6 +210,20 @@ pub(crate) struct StartOptions {
     pub(crate) id: String,
     pub(crate) state_dir: Option<PathBuf>,
     pub(crate) config: Option<PathBuf>,
+    pub(crate) json: bool,
+}
+
+pub(crate) struct UpOptions {
+    pub(crate) name: String,
+    pub(crate) id: Option<String>,
+    pub(crate) repo: Option<String>,
+    pub(crate) project: Option<String>,
+    pub(crate) host: Option<String>,
+    pub(crate) state_dir: Option<PathBuf>,
+    pub(crate) work_root: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
+    pub(crate) profile: Option<PathBuf>,
+    pub(crate) no_attach: bool,
     pub(crate) json: bool,
 }
 
@@ -291,6 +312,44 @@ pub(crate) fn show(options: ShowOptions) -> ExitCode {
         print_show(&output);
     }
     ExitCode::SUCCESS
+}
+
+pub(crate) fn up(options: UpOptions) -> ExitCode {
+    if !options.no_attach
+        && !options.json
+        && (!std::io::stdin().is_terminal() || !std::io::stdout().is_terminal())
+    {
+        eprintln!(
+            "error: shell_error: vm up requires a terminal unless --no-attach or --json is used"
+        );
+        return ExitCode::from(1);
+    }
+    let json = options.json;
+    let no_attach = options.no_attach || json;
+    let state_dir = options.state_dir.clone();
+    let id = options.id.clone().unwrap_or_else(|| slug(&options.name));
+    let output = match up_vm(options) {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("error: {}: {}", error.code, error.message);
+            let code = if error.code == "invalid_args" { 2 } else { 1 };
+            return ExitCode::from(code);
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string(&output).unwrap());
+    } else {
+        print_up(&output);
+    }
+    if no_attach {
+        ExitCode::SUCCESS
+    } else {
+        guest_command(GuestCommandOptions {
+            id,
+            state_dir,
+            tmux: true,
+        })
+    }
 }
 
 pub(crate) fn start(options: StartOptions) -> ExitCode {
@@ -437,6 +496,49 @@ fn show_vm(options: ShowOptions) -> Result<VmShowOutput, VmError> {
         state_file: state_file.display().to_string(),
         record,
         json: options.json,
+    })
+}
+
+fn up_vm(options: UpOptions) -> Result<VmUpOutput, VmError> {
+    let id = options.id.clone().unwrap_or_else(|| slug(&options.name));
+    if !valid_id(&id) {
+        return Err(invalid_args(
+            "VM id must be 1-64 chars of letters, digits, '_' or '-'",
+        ));
+    }
+    let state_root = state_root(options.state_dir.clone())?;
+    let state_file = state_root.join("vms").join(format!("{id}.json"));
+    let config = options.config.clone();
+    let mut created = false;
+    if !state_file.exists() {
+        let tmux_config = load_guest_tmux_config(config.as_deref())?;
+        let create_options = CreateOptions {
+            name: options.name,
+            id: Some(id.clone()),
+            repo: options.repo,
+            project: options.project,
+            host: options.host,
+            state_dir: Some(state_root.clone()),
+            work_root: options.work_root,
+            config: config.clone(),
+            profile: options.profile,
+            dry_run: false,
+            json: false,
+        };
+        let mut output = create_plan(&create_options)?;
+        create_vm_state(&mut output, tmux_config.as_deref())?;
+        created = true;
+    }
+    let start = start_vm(StartOptions {
+        id,
+        state_dir: Some(state_root),
+        config,
+        json: false,
+    })?;
+    Ok(VmUpOutput {
+        schema_version: 1,
+        created,
+        start,
     })
 }
 
@@ -1504,6 +1606,34 @@ fn print_start(output: &VmStartOutput) {
         println!("  tmux: argos vm tmux {}", output.record.id);
     }
     print_links(&output.record, "  ");
+}
+
+fn print_up(output: &VmUpOutput) {
+    println!(
+        "{} {}",
+        if output.created {
+            "created and started"
+        } else if output.start.already_running {
+            "already running"
+        } else {
+            "started"
+        },
+        serde_json::to_string(&output.start.record.name).unwrap()
+    );
+    println!("  id: {}", output.start.record.id);
+    println!("  pid: {}", output.start.pid);
+    println!("  log: {}", output.start.log_path);
+    if let Some(workdir) = output.start.record.guest_workdir.as_ref() {
+        println!(
+            "  guest workdir: {}",
+            serde_json::to_string(workdir).unwrap()
+        );
+    }
+    println!(
+        "  attach: argos sessions attach vm:{}",
+        output.start.record.id
+    );
+    print_links(&output.start.record, "  ");
 }
 
 fn print_show(output: &VmShowOutput) {

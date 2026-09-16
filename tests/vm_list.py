@@ -169,6 +169,9 @@ guest = 5173
         assert duplicate.returncode == 1 and "already exists" in duplicate.stderr
         bad_args = run(str(BINARY), "vm", "create", "bad", "--id", "bad/slash", "--state-dir", str(create_state), "--json")
         assert bad_args.returncode == 2
+        non_tty_up = run(str(BINARY), "vm", "up", "Needs Terminal", "--state-dir", str(create_state))
+        assert non_tty_up.returncode == 1 and "requires a terminal" in non_tty_up.stderr
+        assert not (create_state / "vms" / "needs-terminal.json").exists()
 
         fake_bin = root / "fake-bin"
         fake_store = root / "fake-store"
@@ -220,6 +223,11 @@ out.symlink_to(runner)
         again = run(str(BINARY), "vm", "start", "trade-feature", "--state-dir", str(create_state), "--config", str(inline_config), "--json", env=fake_env)
         assert again.returncode == 0, again.stderr
         assert json.loads(again.stdout)["already_running"] is True
+        up_existing = run(str(BINARY), "vm", "up", "Trade Feature", "--state-dir", str(create_state), "--config", str(inline_config), "--json", env=fake_env)
+        assert up_existing.returncode == 0, up_existing.stderr
+        up_existing_value = json.loads(up_existing.stdout)
+        assert up_existing_value["created"] is False
+        assert up_existing_value["start"]["already_running"] is True
         stopped = run(str(BINARY), "vm", "stop", "trade-feature", "--state-dir", str(create_state), "--json")
         assert stopped.returncode == 0, stopped.stderr
         stop_value = json.loads(stopped.stdout)
@@ -230,6 +238,19 @@ out.symlink_to(runner)
         stopped_again = run(str(BINARY), "vm", "stop", "trade-feature", "--state-dir", str(create_state), "--json")
         assert stopped_again.returncode == 0, stopped_again.stderr
         assert json.loads(stopped_again.stdout)["already_stopped"] is True
+
+        up_new = run(str(BINARY), "vm", "up", "Up Feature", "--repo", str(source), "--state-dir", str(create_state), "--work-root", str(work_root), "--profile", str(profile), "--config", str(inline_config), "--json", env=fake_env)
+        assert up_new.returncode == 0, up_new.stderr
+        up_new_value = json.loads(up_new.stdout)
+        assert up_new_value["created"] is True
+        assert up_new_value["start"]["record"]["id"] == "up-feature"
+        assert up_new_value["start"]["record"]["status"] == "running"
+        assert (work_root / "up-feature" / "repo" / ".git").is_dir()
+        up_human = run(str(BINARY), "vm", "up", "Up Feature", "--state-dir", str(create_state), "--config", str(inline_config), "--no-attach", env=fake_env)
+        assert up_human.returncode == 0, up_human.stderr
+        assert "already running" in up_human.stdout and "attach: argos sessions attach vm:up-feature" in up_human.stdout
+        stopped_up = run(str(BINARY), "vm", "stop", "up-feature", "--state-dir", str(create_state), "--json")
+        assert stopped_up.returncode == 0, stopped_up.stderr
 
         (vms / "bad.json").write_text(json.dumps(record("bad/slash")))
         bad = run(str(BINARY), "vm", "list", "--state-dir", str(state), "--json")
