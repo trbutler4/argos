@@ -1,6 +1,7 @@
 use crate::{config, host};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeSet,
     fs,
     io::IsTerminal,
     io::Read,
@@ -14,6 +15,8 @@ const NIXPKGS_URL: &str = "github:NixOS/nixpkgs/dc5d91f840324650bac8c379428c7037
 const MICROVM_URL: &str = "github:microvm-nix/microvm.nix/614e9541186d724438edfd91c3bbc8474dd1b76e";
 const START_READY_TIMEOUT: Duration = Duration::from_secs(45);
 const SSH_KEYSCAN_TIMEOUT: Duration = Duration::from_secs(15);
+const APP_PORT_START: u16 = 43000;
+const APP_PORT_END: u16 = 45999;
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct VmSnapshot {
@@ -35,6 +38,14 @@ pub(crate) struct VmRecord {
     pub(crate) project: Option<String>,
     #[serde(default)]
     pub(crate) source_repo: Option<String>,
+    #[serde(default)]
+    pub(crate) profile_path: Option<String>,
+    #[serde(default)]
+    pub(crate) guest_workdir: Option<String>,
+    #[serde(default)]
+    pub(crate) packages: Vec<String>,
+    #[serde(default)]
+    pub(crate) ports: Vec<VmPortMapping>,
     #[serde(default)]
     pub(crate) repo_path: Option<String>,
     #[serde(default)]
@@ -67,6 +78,54 @@ pub(crate) struct VmRecord {
     pub(crate) started_at_unix_ms: Option<u64>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VmPortMapping {
+    pub(crate) name: String,
+    pub(crate) guest: u16,
+    pub(crate) host: u16,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepoProfile {
+    #[serde(default)]
+    workspace: ProfileWorkspace,
+    #[serde(default)]
+    vm: ProfileVm,
+    #[serde(default)]
+    ports: Vec<ProfilePort>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileWorkspace {
+    #[serde(default = "default_guest_workdir")]
+    workdir: String,
+}
+
+impl Default for ProfileWorkspace {
+    fn default() -> Self {
+        Self {
+            workdir: default_guest_workdir(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileVm {
+    #[serde(default)]
+    packages: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfilePort {
+    name: String,
+    guest: u16,
+}
+
 #[derive(Debug, Serialize)]
 struct VmCreateOutput {
     schema_version: u32,
@@ -78,6 +137,16 @@ struct VmCreateOutput {
     pub(crate) repo_path: Option<String>,
     microvm_config: String,
     record: VmRecord,
+}
+
+#[derive(Debug, Serialize)]
+struct VmShowOutput {
+    schema_version: u32,
+    state_root: String,
+    state_file: String,
+    record: VmRecord,
+    #[serde(skip_serializing)]
+    json: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,7 +188,14 @@ pub(crate) struct CreateOptions {
     pub(crate) state_dir: Option<PathBuf>,
     pub(crate) work_root: Option<PathBuf>,
     pub(crate) config: Option<PathBuf>,
+    pub(crate) profile: Option<PathBuf>,
     pub(crate) dry_run: bool,
+    pub(crate) json: bool,
+}
+
+pub(crate) struct ShowOptions {
+    pub(crate) id: String,
+    pub(crate) state_dir: Option<PathBuf>,
     pub(crate) json: bool,
 }
 
@@ -178,7 +254,7 @@ pub(crate) fn create(options: CreateOptions) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let output = match create_plan(&options) {
+    let mut output = match create_plan(&options) {
         Ok(plan) => plan,
         Err(error) => {
             eprintln!("error: {}", error.message);
@@ -187,7 +263,7 @@ pub(crate) fn create(options: CreateOptions) -> ExitCode {
         }
     };
     if !options.dry_run
-        && let Err(error) = create_vm_state(&output, tmux_config.as_deref())
+        && let Err(error) = create_vm_state(&mut output, tmux_config.as_deref())
     {
         eprintln!("error: {}: {}", error.code, error.message);
         return ExitCode::from(1);
@@ -196,6 +272,23 @@ pub(crate) fn create(options: CreateOptions) -> ExitCode {
         println!("{}", serde_json::to_string(&output).unwrap());
     } else {
         print_create(&output);
+    }
+    ExitCode::SUCCESS
+}
+
+pub(crate) fn show(options: ShowOptions) -> ExitCode {
+    let output = match show_vm(options) {
+        Ok(record) => record,
+        Err(error) => {
+            eprintln!("error: {}: {}", error.code, error.message);
+            let code = if error.code == "invalid_args" { 2 } else { 1 };
+            return ExitCode::from(code);
+        }
+    };
+    if output.json {
+        println!("{}", serde_json::to_string(&output).unwrap());
+    } else {
+        print_show(&output);
     }
     ExitCode::SUCCESS
 }
@@ -282,6 +375,10 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
     };
     let workdir = work_root.join(&id);
     let repo_path = options.repo.as_ref().map(|_| workdir.join("repo"));
+    let profile = load_repo_profile(options.profile.as_deref(), options.repo.as_deref())?;
+    let guest_workdir = profile.profile.workspace.workdir.clone();
+    let packages = profile.profile.vm.packages.clone();
+    let ports = allocate_port_mappings(&profile.profile, &state_root)?;
     let ssh_port = ssh_port_for_id(&id);
     let record = VmRecord {
         schema_version: 1,
@@ -291,6 +388,10 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
         host,
         project: options.project.clone(),
         source_repo: options.repo.clone(),
+        profile_path: profile.path.map(|path| path.display().to_string()),
+        guest_workdir: Some(guest_workdir),
+        packages,
+        ports,
         repo_path: repo_path.as_ref().map(|path| path.display().to_string()),
         workdir: Some(workdir.display().to_string()),
         instance_dir: Some(instance_dir.display().to_string()),
@@ -321,7 +422,25 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
     })
 }
 
-fn create_vm_state(output: &VmCreateOutput, tmux_config: Option<&str>) -> Result<(), VmError> {
+fn show_vm(options: ShowOptions) -> Result<VmShowOutput, VmError> {
+    if !valid_id(&options.id) {
+        return Err(invalid_args(
+            "VM id must be 1-64 chars of letters, digits, '_' or '-'",
+        ));
+    }
+    let state_root = state_root(options.state_dir)?;
+    let state_file = state_root.join("vms").join(format!("{}.json", options.id));
+    let record = load_record(&state_file)?;
+    Ok(VmShowOutput {
+        schema_version: 1,
+        state_root: state_root.display().to_string(),
+        state_file: state_file.display().to_string(),
+        record,
+        json: options.json,
+    })
+}
+
+fn create_vm_state(output: &mut VmCreateOutput, tmux_config: Option<&str>) -> Result<(), VmError> {
     let state_file = PathBuf::from(&output.state_file);
     if state_file.exists() {
         return Err(VmError {
@@ -375,6 +494,7 @@ fn create_vm_state(output: &VmCreateOutput, tmux_config: Option<&str>) -> Result
             });
         }
     }
+    apply_default_cloned_profile(output)?;
     write_guest_tmux_config(&instance_dir, tmux_config)?;
     fs::write(
         &output.microvm_config,
@@ -611,6 +731,190 @@ fn state_root(override_dir: Option<PathBuf>) -> Result<PathBuf, VmError> {
     Ok(host::state_root())
 }
 
+struct LoadedProfile {
+    profile: RepoProfile,
+    path: Option<PathBuf>,
+}
+
+fn default_guest_workdir() -> String {
+    "/workspace/repo".into()
+}
+
+fn load_repo_profile(
+    explicit: Option<&Path>,
+    repo: Option<&str>,
+) -> Result<LoadedProfile, VmError> {
+    if let Some(path) = explicit {
+        let path = normalize_profile_path(path)?;
+        let profile = read_repo_profile(&path)?;
+        return Ok(LoadedProfile {
+            profile,
+            path: Some(path),
+        });
+    }
+    if let Some(repo) = repo {
+        let path = Path::new(repo).join(".argos.toml");
+        if path.is_file() {
+            let path = normalize_profile_path(&path)?;
+            let profile = read_repo_profile(&path)?;
+            return Ok(LoadedProfile {
+                profile,
+                path: Some(path),
+            });
+        }
+    }
+    Ok(LoadedProfile {
+        profile: RepoProfile::default(),
+        path: None,
+    })
+}
+
+fn normalize_profile_path(path: &Path) -> Result<PathBuf, VmError> {
+    if path.as_os_str().is_empty() {
+        return Err(invalid_args("--profile cannot be empty"));
+    }
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| state_error(format!("cannot read current directory: {error}")))?
+            .join(path)
+    };
+    Ok(path)
+}
+
+fn read_repo_profile(path: &Path) -> Result<RepoProfile, VmError> {
+    let text = fs::read_to_string(path).map_err(|error| VmError {
+        code: "profile_error",
+        message: format!("cannot read repo profile {}: {error}", path.display()),
+    })?;
+    let profile: RepoProfile = toml::from_str(&text).map_err(|error| VmError {
+        code: "profile_error",
+        message: format!("invalid repo profile {}: {error}", path.display()),
+    })?;
+    validate_profile(&profile, path)?;
+    Ok(profile)
+}
+
+fn validate_profile(profile: &RepoProfile, path: &Path) -> Result<(), VmError> {
+    if !profile.workspace.workdir.starts_with('/')
+        || profile.workspace.workdir.contains('\0')
+        || profile.workspace.workdir.chars().any(char::is_control)
+    {
+        return Err(VmError {
+            code: "profile_error",
+            message: format!(
+                "invalid repo profile {}: workspace.workdir must be an absolute guest path",
+                path.display()
+            ),
+        });
+    }
+    let mut packages = BTreeSet::new();
+    for package in &profile.vm.packages {
+        if !valid_package_attr(package) || !packages.insert(package) {
+            return Err(VmError {
+                code: "profile_error",
+                message: format!(
+                    "invalid repo profile {}: vm.packages contains invalid or duplicate attr {package:?}",
+                    path.display()
+                ),
+            });
+        }
+    }
+    let mut port_names = BTreeSet::new();
+    let mut guest_ports = BTreeSet::new();
+    for port in &profile.ports {
+        if !valid_port_name(&port.name)
+            || !port_names.insert(port.name.as_str())
+            || !guest_ports.insert(port.guest)
+            || port.guest == 0
+        {
+            return Err(VmError {
+                code: "profile_error",
+                message: format!(
+                    "invalid repo profile {}: ports require unique safe names and guest ports",
+                    path.display()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn valid_package_attr(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && !value.starts_with('.')
+        && !value.ends_with('.')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+}
+
+fn valid_port_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn allocate_port_mappings(
+    profile: &RepoProfile,
+    state_root: &Path,
+) -> Result<Vec<VmPortMapping>, VmError> {
+    let mut used = used_host_ports(state_root)?;
+    let mut mappings = Vec::new();
+    for port in &profile.ports {
+        let Some(host) = (APP_PORT_START..=APP_PORT_END).find(|candidate| used.insert(*candidate))
+        else {
+            return Err(VmError {
+                code: "state_error",
+                message: format!("no free host ports in range {APP_PORT_START}-{APP_PORT_END}"),
+            });
+        };
+        mappings.push(VmPortMapping {
+            name: port.name.clone(),
+            guest: port.guest,
+            host,
+        });
+    }
+    Ok(mappings)
+}
+
+fn used_host_ports(state_root: &Path) -> Result<BTreeSet<u16>, VmError> {
+    let mut used = BTreeSet::new();
+    for record in load_vms(&state_root.join("vms"))? {
+        if let Some(port) = record.ssh_port {
+            used.insert(port);
+        }
+        for mapping in record.ports {
+            used.insert(mapping.host);
+        }
+    }
+    Ok(used)
+}
+
+fn apply_default_cloned_profile(output: &mut VmCreateOutput) -> Result<(), VmError> {
+    if output.record.profile_path.is_some() {
+        return Ok(());
+    }
+    let Some(repo_path) = output.repo_path.as_ref().map(PathBuf::from) else {
+        return Ok(());
+    };
+    let profile_path = repo_path.join(".argos.toml");
+    if !profile_path.is_file() {
+        return Ok(());
+    }
+    let profile = read_repo_profile(&profile_path)?;
+    let state_root = PathBuf::from(&output.state_root);
+    output.record.profile_path = Some(profile_path.display().to_string());
+    output.record.guest_workdir = Some(profile.workspace.workdir.clone());
+    output.record.packages = profile.vm.packages.clone();
+    output.record.ports = allocate_port_mappings(&profile, &state_root)?;
+    Ok(())
+}
+
 fn load_snapshot(state_root: &Path) -> Result<VmSnapshot, VmError> {
     let mut vms = load_vms(&state_root.join("vms"))?;
     vms.sort_by(|a, b| a.id.cmp(&b.id));
@@ -761,7 +1065,11 @@ fn run_guest_command(options: GuestCommandOptions) -> Result<ExitCode, VmError> 
             &format!("UserKnownHostsFile={}", known_hosts.display()),
         ])
         .arg(destination);
-    let workspace_prefix = "cd /workspace/repo 2>/dev/null || cd /workspace 2>/dev/null || cd";
+    let guest_workdir = record.guest_workdir.as_deref().unwrap_or("/workspace/repo");
+    let workspace_prefix = format!(
+        "cd {} 2>/dev/null || cd /workspace/repo 2>/dev/null || cd /workspace 2>/dev/null || cd",
+        shell_quote(guest_workdir)
+    );
     if options.tmux {
         command.arg(format!(
             "{workspace_prefix}; if [ -f /etc/tmux.conf ]; then exec tmux -f /etc/tmux.conf new -A -s main; else exec tmux new -A -s main; fi"
@@ -1041,6 +1349,31 @@ fn validate_record(record: &VmRecord, path: &Path) -> Result<(), VmError> {
     if !valid_id(&record.id) {
         return Err(invalid(path, "invalid id"));
     }
+    if let Some(workdir) = &record.guest_workdir
+        && (!workdir.starts_with('/') || workdir.chars().any(|c| c == '\0' || c.is_control()))
+    {
+        return Err(invalid(path, "invalid guest_workdir"));
+    }
+    let mut packages = BTreeSet::new();
+    for package in &record.packages {
+        if !valid_package_attr(package) || !packages.insert(package) {
+            return Err(invalid(path, "invalid package"));
+        }
+    }
+    let mut port_names = BTreeSet::new();
+    let mut guest_ports = BTreeSet::new();
+    let mut host_ports = BTreeSet::new();
+    for mapping in &record.ports {
+        if !valid_port_name(&mapping.name)
+            || mapping.guest == 0
+            || mapping.host == 0
+            || !port_names.insert(mapping.name.as_str())
+            || !guest_ports.insert(mapping.guest)
+            || !host_ports.insert(mapping.host)
+        {
+            return Err(invalid(path, "invalid port mapping"));
+        }
+    }
     Ok(())
 }
 
@@ -1113,6 +1446,7 @@ fn print_human(snapshot: &VmSnapshot) {
         if let Some(repo_path) = &vm.repo_path {
             println!("  repo: {}", serde_json::to_string(repo_path).unwrap());
         }
+        print_record_profile(vm, "  ");
         if let Some(workdir) = &vm.workdir {
             println!("  workdir: {}", serde_json::to_string(workdir).unwrap());
         }
@@ -1139,6 +1473,7 @@ fn print_create(output: &VmCreateOutput) {
     if let Some(repo_path) = &output.repo_path {
         println!("  repo: {repo_path}");
     }
+    print_record_profile(&output.record, "  ");
     println!("  microvm: {}", output.microvm_config);
     if output.dry_run {
         println!("  dry-run: no files written");
@@ -1167,6 +1502,72 @@ fn print_start(output: &VmStartOutput) {
         println!("  ssh: {user}@{host}:{port}");
         println!("  shell: argos vm shell {}", output.record.id);
         println!("  tmux: argos vm tmux {}", output.record.id);
+    }
+    print_links(&output.record, "  ");
+}
+
+fn print_show(output: &VmShowOutput) {
+    let vm = &output.record;
+    println!(
+        "{} ({}) on {}",
+        serde_json::to_string(&vm.name).unwrap(),
+        vm.status,
+        vm.host
+    );
+    println!("  id: {}", vm.id);
+    println!("  state: {}", output.state_file);
+    if let Some(project) = &vm.project {
+        println!("  project: {}", serde_json::to_string(project).unwrap());
+    }
+    if let Some(repo) = &vm.source_repo {
+        println!("  source: {}", serde_json::to_string(repo).unwrap());
+    }
+    if let Some(repo_path) = &vm.repo_path {
+        println!("  repo: {}", serde_json::to_string(repo_path).unwrap());
+    }
+    if let Some(workdir) = &vm.workdir {
+        println!("  workdir: {}", serde_json::to_string(workdir).unwrap());
+    }
+    if let Some(config) = &vm.microvm_config {
+        println!("  microvm: {}", serde_json::to_string(config).unwrap());
+    }
+    if let (Some(user), Some(host), Some(port)) =
+        (vm.ssh_user.as_ref(), vm.ssh_host.as_ref(), vm.ssh_port)
+    {
+        println!("  ssh: {user}@{host}:{port}");
+    }
+    print_record_profile(vm, "  ");
+}
+
+fn print_record_profile(vm: &VmRecord, prefix: &str) {
+    if let Some(profile) = &vm.profile_path {
+        println!(
+            "{prefix}profile: {}",
+            serde_json::to_string(profile).unwrap()
+        );
+    }
+    if let Some(workdir) = &vm.guest_workdir {
+        println!(
+            "{prefix}guest workdir: {}",
+            serde_json::to_string(workdir).unwrap()
+        );
+    }
+    if !vm.packages.is_empty() {
+        println!("{prefix}packages: {}", vm.packages.join(", "));
+    }
+    print_links(vm, prefix);
+}
+
+fn print_links(vm: &VmRecord, prefix: &str) {
+    if vm.ports.is_empty() {
+        return;
+    }
+    println!("{prefix}links:");
+    for mapping in &vm.ports {
+        println!(
+            "{prefix}  {}: http://127.0.0.1:{} -> guest:{}",
+            mapping.name, mapping.host, mapping.guest
+        );
     }
 }
 
@@ -1221,12 +1622,15 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
     let tmux_block = render_tmux_config_block(tmux_config);
     let tmux_store_shares = render_tmux_store_shares(tmux_config);
     let workspace_share = render_workspace_share(record);
+    let packages = render_system_packages(record);
+    let firewall_ports = render_firewall_ports(record);
+    let app_forwards = render_app_port_forwards(record);
     format!(
         r#"{{ pkgs, lib, config, ... }}:
 {{
   networking.hostName = {host};
   networking.interfaces.eth0.useDHCP = true;
-  networking.firewall.allowedTCPPorts = [ 22 ];
+  networking.firewall.allowedTCPPorts = {firewall_ports};
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
   system.stateVersion = "25.11";
 
@@ -1242,7 +1646,7 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
     ];
   }};
 
-  environment.systemPackages = with pkgs; [ git tmux openssh ];
+  environment.systemPackages = with pkgs; {packages};
   environment.etc."gitconfig".text = ''
     [safe]
       directory = /workspace/repo
@@ -1274,6 +1678,7 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
     ];
     forwardPorts = [
       {{ from = "host"; host.address = "127.0.0.1"; host.port = {ssh_port}; guest.port = 22; }}
+{app_forwards}
     ];
     volumes = [
       {{ mountPoint = "/var"; image = "var.img"; size = 1024; }}
@@ -1298,7 +1703,49 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
         tmux_block = tmux_block,
         tmux_store_shares = tmux_store_shares,
         workspace_share = workspace_share,
+        packages = packages,
+        firewall_ports = firewall_ports,
+        app_forwards = app_forwards,
     )
+}
+
+fn render_system_packages(record: &VmRecord) -> String {
+    let mut packages = vec!["git".to_string(), "tmux".to_string(), "openssh".to_string()];
+    for package in &record.packages {
+        if !packages.iter().any(|existing| existing == package) {
+            packages.push(package.clone());
+        }
+    }
+    format!("[ {} ]", packages.join(" "))
+}
+
+fn render_firewall_ports(record: &VmRecord) -> String {
+    let mut ports = vec![22_u16];
+    for mapping in &record.ports {
+        if !ports.contains(&mapping.guest) {
+            ports.push(mapping.guest);
+        }
+    }
+    ports.sort_unstable();
+    format!(
+        "[ {} ]",
+        ports
+            .into_iter()
+            .map(|port| port.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+fn render_app_port_forwards(record: &VmRecord) -> String {
+    let mut out = String::new();
+    for mapping in &record.ports {
+        out.push_str(&format!(
+            "      {{ from = \"host\"; host.address = \"127.0.0.1\"; host.port = {}; guest.port = {}; }}\n",
+            mapping.host, mapping.guest
+        ));
+    }
+    out
 }
 
 fn render_workspace_share(record: &VmRecord) -> String {
@@ -1486,6 +1933,71 @@ mod tests {
         let snapshot = load_snapshot(&root).unwrap();
         assert_eq!(snapshot.vms[0].id, "a");
         assert_eq!(snapshot.vms[1].id, "b");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parses_profile_and_allocates_distinct_host_ports() {
+        let root = std::env::temp_dir().join(format!(
+            "argos-profile-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let profile_path = root.join(".argos.toml");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &profile_path,
+            r#"[workspace]
+workdir = "/workspace/repo"
+
+[vm]
+packages = ["go", "just"]
+
+[[ports]]
+name = "api"
+guest = 3001
+"#,
+        )
+        .unwrap();
+        let profile = read_repo_profile(&profile_path).unwrap();
+        assert_eq!(profile.workspace.workdir, "/workspace/repo");
+        assert_eq!(profile.vm.packages, vec!["go", "just"]);
+        let first = allocate_port_mappings(&profile, &root).unwrap();
+        assert_eq!(first[0].guest, 3001);
+        let vms = root.join("vms");
+        fs::create_dir_all(&vms).unwrap();
+        fs::write(
+            vms.join("used.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "id": "used",
+                "name": "Used",
+                "status": "created",
+                "host": "here",
+                "ports": first,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let second = allocate_port_mappings(&profile, &root).unwrap();
+        assert_eq!(second[0].guest, 3001);
+        assert_ne!(second[0].host, first[0].host);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_bad_profile_values() {
+        let root = std::env::temp_dir().join(format!(
+            "argos-bad-profile-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let bad = root.join("bad.toml");
+        fs::write(&bad, "[vm]\npackages = [\"../bad\"]\n").unwrap();
+        assert!(read_repo_profile(&bad).is_err());
+        fs::write(&bad, "[[ports]]\nname = \"api\"\nguest = 0\n").unwrap();
+        assert!(read_repo_profile(&bad).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }

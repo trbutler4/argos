@@ -1,10 +1,12 @@
 # PROPOSED schema only. There is no loader yet and these entries are not enrolled.
-# Copy/edit per client when M0 is implemented. SSH aliases must already work.
-# No credentials, private keys or executable bootstrap snippets belong here.
+# Copy/edit per client when future remote VM placement is implemented. SSH aliases
+# must already work. No credentials, private keys or executable bootstrap snippets
+# belong here.
+#
 # This is machine inventory + project defaults, not the runtime VM registry.
-# env create chooses a host and allocates guest identity, disk and clone paths.
-# Service entries below describe access targets, not process definitions.
-# Databases/processes and their persistent state are defined by the project's devenv.
+# A per-repo .argos.toml is the active repo profile format for packages and guest
+# ports. Argos installs packages and forwards ports, but it does not manage app
+# processes.
 schema_version = 1
 
 [client]
@@ -23,25 +25,31 @@ ssh_alias = "server"
 allow_managed_vms = false
 
 [defaults.vm]
-vcpus = 2
+vcpus = 4
 memory_mib = 4096
 # Initial sizing hypothesis. Measure real stack and disk use during M1.
 disk_gib = 32
+# Future remote placement may use this as a default allocation range.
+host_port_range = [43000, 45999]
 
 [projects.example]
 # Placeholder only. First real project and its authentication are not chosen yet.
 repository = "https://example.invalid/me/project.git"
 base_ref = "main"
-tooling = "devenv"
-autostart_stack = false
+profile = ".argos.toml"
 
-[projects.example.services.web]
-# Target inside guest, reached through SSH forwarding. Not host/tailnet ingress.
-host = "127.0.0.1"
-port = 3000
-scheme = "http"
-
-[projects.example.services.api]
-host = "127.0.0.1"
-port = 8080
-scheme = "http"
+# Active per-repo profile example, stored in the repo itself:
+#
+# [workspace]
+# workdir = "/workspace/repo"
+#
+# [vm]
+# packages = ["go", "nodejs", "postgresql", "redis", "just"]
+#
+# [[ports]]
+# name = "api"
+# guest = 3001
+#
+# [[ports]]
+# name = "web"
+# guest = 5173

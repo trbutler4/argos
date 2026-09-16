@@ -111,22 +111,28 @@ or through configured SSH aliases so the controller can check VM hosts before as
 
 The first VM lifecycle commands are conservative and host-local. `create` writes
 state, creates a per-VM work directory, optionally clones a separate repo, and
-renders a microVM config plus instance flake. `start` builds the local microVM
-runner, launches it in a dedicated tmux console session, waits for
+renders a microVM config plus instance flake. A repo may include `.argos.toml`,
+or `create` may receive `--profile PATH`, to declare guest packages and guest
+ports. Argos installs those packages and allocates unique host loopback ports per
+VM instance, but it does not manage project processes. `start` builds the local
+microVM runner, launches it in a dedicated tmux console session, waits for
 `ARGOS_VM_READY`, and records the PID/log/session paths. `create` and `start`
 can read `[vm.guest_tmux]` from the selected Argos config and install either
 inline `config_text` or `config_path` contents as `/etc/tmux.conf` inside the
 guest. The VM mounts the per-VM work directory at `/workspace`, so a cloned
-repo is available at `/workspace/repo`. `shell` and `tmux` start there by
-default. Guests include flakes, a writable Nix store overlay, and enough default
-memory for small `nix develop` workflows. `stop` terminates the recorded local
-process and keeps persistent instance data.
+repo is available at `/workspace/repo` by default. `shell` and `tmux` start
+there by default. Guests include flakes, a writable Nix store overlay, and enough
+default memory for small `nix develop` workflows. `show` reports one VM record,
+including package intent and `http://127.0.0.1:<host-port>` links. `stop`
+terminates the recorded local process and keeps persistent instance data.
 
 ```sh
 argos vm list
 argos vm list --json
-argos vm create "Trade Feature" --repo /path/or/git-url --project trade --config ./config.local.toml
+argos vm create "Trade Feature" --repo /path/or/git-url --project trade --config ./config.local.toml --profile ./.argos.toml
 argos vm create "Trade Feature" --repo /path/or/git-url --dry-run --json
+argos vm show trade-feature
+argos vm show trade-feature --json
 argos vm start trade-feature --config ./config.local.toml
 argos vm shell trade-feature
 argos vm tmux trade-feature
@@ -135,11 +141,34 @@ argos vm stop trade-feature
 argos vm list --state-dir /absolute/test/state --json
 ```
 
+Repo profile example:
+
+```toml
+[workspace]
+workdir = "/workspace/repo"
+
+[vm]
+packages = ["go", "nodejs", "postgresql", "redis", "just"]
+
+[[ports]]
+name = "api"
+guest = 3001
+
+[[ports]]
+name = "web"
+guest = 5173
+```
+
+Two VMs for the same repo can both use guest port `3001`. Argos persists a
+distinct host port for each VM, for example `api: http://127.0.0.1:43000 ->
+guest:3001` and `api: http://127.0.0.1:43002 -> guest:3001`.
+
 State records live under `$ARGOS_STATE_DIR/vms/*.json`, otherwise
 `$XDG_STATE_HOME/argos/vms/*.json` or `~/.local/state/argos/vms/*.json`.
 Generated instance scaffolds live under `instances/`, and default work clones
 under `workdirs/`. VM start/shell/tmux/stop is local-only for now.
-Remote placement, port-collision handling and project setup come later.
+Remote placement, Tailscale HTTPS names and project process management come
+later.
 
 Optional config:
 

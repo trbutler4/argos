@@ -146,8 +146,18 @@ enum VmCommand {
         work_root: Option<std::path::PathBuf>,
         #[arg(long, value_name = "PATH")]
         config: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        profile: Option<std::path::PathBuf>,
         #[arg(long)]
         dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one VM record, including workspace and exposed links.
+    Show {
+        id: String,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -274,6 +284,7 @@ fn main() -> ExitCode {
                 state_dir,
                 work_root,
                 config,
+                profile,
                 dry_run,
                 json,
             } => vm::create(vm::CreateOptions {
@@ -285,7 +296,17 @@ fn main() -> ExitCode {
                 state_dir,
                 work_root,
                 config,
+                profile,
                 dry_run,
+                json,
+            }),
+            VmCommand::Show {
+                id,
+                state_dir,
+                json,
+            } => vm::show(vm::ShowOptions {
+                id,
+                state_dir,
                 json,
             }),
             VmCommand::Start {

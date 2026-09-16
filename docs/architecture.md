@@ -13,8 +13,8 @@ The VM details must pass
 | OpenSSH | Authentication, remote commands, PTYs, file transfer and tunnels | Application lifecycle |
 | tmux | Persistent interactive sessions, panes, scrollback and manual agent terminals | VM or database supervision |
 | NixOS/systemd | Host capabilities, VM lifecycle and guest boot services | Project-specific tooling definitions |
-| devenv | Pinned project tooling, development processes, readiness and logs | VM creation or cross-machine discovery |
-| argos | Inventory, selection, environment operations, connection and status | A new terminal emulator, process manager, VPN or Git hosting service |
+| Repo tooling | Project-specific commands, dev servers, process supervision and logs | VM creation or cross-machine discovery |
+| argos | Inventory, selection, VM lifecycle, workspace/package/port setup, connection and status | A new terminal emulator, process manager, VPN or Git hosting service |
 
 **Build the Rust CLI first (M0a), then the full-screen TUI (M0b).** Rust is chosen
 for learning, not a demonstrated performance need. The CLI is the canonical interface
@@ -107,7 +107,7 @@ it visible. Do not mistake multiple clients for duplicate environments.
 ## 4. A managed task environment
 
 Each environment has a stable ID, a display name, a home machine, a project URL,
-branch/ref, persistent storage, VM allocation, service descriptors and tmux sessions.
+  branch/ref, persistent storage, VM allocation, package/port descriptors and tmux sessions.
 The global identity is `(machine ID, environment ID)`, not just a task name.
 
 **A full clone inside the VM** keeps `.git`, source and runtime state independent.
@@ -117,7 +117,7 @@ remain a separate unmanaged resource type and cannot be stopped/destroyed by VM 
 Store persistent state for:
 
 - clone, uncommitted files, commits and build outputs that the user chooses to retain;
-- project database data and devenv state (not just the source tree);
+- project database data and tool state (not just the source tree);
 - the guest's writable Nix store **and its matching Nix database/metadata**;
 - guest SSH host identity and explicitly provisioned user configuration.
 
@@ -148,26 +148,21 @@ helper. Do not promise a particular microvm.nix dynamic-creation API before test
 
 ## 5. Process and session lifetime
 
-Inside a guest, devenv defines runtimes, services, dependencies and readiness probes.
-Pin the devenv version and use the process manager it actually supports; current
-upstream documents a native manager, but older versions use different backends.
-Do not assume process-compose is mandatory.
-
-Guest systemd should own a development-stack service whose lifetime is independent
-of SSH, tmux clients, and the dashboard. Integrate the pinned devenv command with
-correct process supervision and shutdown. A detached launcher that exits immediately
-must not be mistaken for a running stack by systemd. Validate foreground/detached
-semantics in the prototype instead of shipping a guessed unit.
+Argos is not a process manager. A repo profile may declare guest packages and
+guest ports, but project processes are started manually or by repo-owned tooling
+inside guest tmux. That tooling may be devenv, just, make, docker-compatible
+commands or direct language toolchains. Argos should not model or supervise
+Postgres, Redis, API servers or frontend processes.
 
 - tmux hosts interactive shells, editor/agent terminals and optional log views.
-- devenv owns the project's long-lived backend/database processes.
-- Guest boot may start the stack according to explicit project policy, not by every
-  tmux shell's startup hooks.
-- Authentication or project bootstrap failure is visible and retryable. Never report
-  `ready` merely because the VM is running or the devenv process exists.
+- Repo tooling owns the project's long-lived backend/database processes.
+- Guest boot does not start project stacks by default. If autostart is ever added,
+  it must be explicit project policy and still outside Argos' process supervision.
+- Authentication or project bootstrap failure is visible in the user's tools. Never report
+  a project `ready` state merely because the VM is running.
 - Dependency updates are explicit. Creating a task uses the project's committed lockfiles.
-- Projects without devenv can first use an explicit command adapter to an existing
-  Nix shell. Do not silently rewrite their toolchain or migrate all repos at once.
+- Projects can adopt devenv later if useful, but Argos must also support existing
+  repos whose minimum contract is a guest package list and interactive tmux shell.
 
 A stopped VM loses live processes, SSH connections and in-memory tmux sessions.
 Starting it restores persistent files/data and configured services, **not RAM or the
@@ -186,27 +181,30 @@ by every microvm.nix hypervisor.
 local terminal/browser
   -> SSH over Tailscale to host
      -> guest SSH through host-local routing/forward
-        -> guest loopback frontend/API/database
+        -> guest frontend/API/database port
 ```
 
-Use an SSH jump connection to the guest so a local forward terminates at the guest's
-loopback service. This lets two guests both use, for example, frontend 3000, backend
+Use host-loopback-only forwards to reach guest service ports. With QEMU user-mode
+networking, project servers should listen on a guest interface reachable by the
+forward, often `0.0.0.0`, while the host side remains bound to `127.0.0.1`.
+This lets two guests both use, for example, frontend 3000, backend
 8080 and PostgreSQL 5432 without changing their projects. Authenticate and verify
 host keys for both hops. Give each guest a stable SSH HostKeyAlias so reuse of a host
 forwarded port does not confuse identities.
 
-`open` creates or reuses a **client-owned** loopback tunnel, verifies the port is bound,
-and opens the browser on that same client. Reserve/select a free local port and report
-it accurately. Reuse a stable port per client/environment when available, and handle
-collisions rather than stealing or killing unrelated listeners. Track tunnels outside
-the transient picker so switching tasks does not close them. Clean up only owned tunnels.
+Repo profiles declare guest ports. Argos allocates and persists per-VM host
+loopback ports from its managed range, then renders microVM forwards such as
+guest `3001` to host `43000`. Two VMs for the same repo may both listen on
+guest `3001`; the host ports remain distinct. Future `open` support should
+reuse these mappings, verify the port is bound, and open the browser on the
+client running Argos. Handle collisions rather than stealing or killing unrelated listeners.
 
 Here, client means the machine running argos. A argos process reached by
 SSH on a headless machine cannot silently open the original laptop's browser. Run
 the browser-access client on the workstation, or print connection/tunnel instructions
 when no local graphical browser is available.
 
-MVP URLs are explicit `http://127.0.0.1:<port>`. Friendly names, local reverse proxy and
+MVP URLs are explicit `http://127.0.0.1:<allocated-port>`. Friendly names, local reverse proxy and
 HTTPS can come later. `.localhost` resolves on the browser's machine, not a remote host;
 Tailscale DNS alone does not configure wildcard routes, certificates or application
 origins. Test WebSockets/HMR, absolute API URLs and CORS in the actual selected project.
@@ -230,9 +228,9 @@ Two dashboards must be able to inspect the same environment without registry syn
 The example inventory deliberately does not declare individual task VMs, their clone
 paths or database processes. `env create --host` creates a host-owned runtime record
 containing the environment/project IDs, chosen branch, managed disk/clone paths,
-guest SSH identity, VM allocation, service endpoints and operation status. Project
-devenv definitions own database processes/data locations; access descriptors do not
-duplicate those definitions. Credential provisioning is an explicit M1 design input,
+guest SSH identity, VM allocation, package intent, port mappings and operation status. Project
+tooling owns database processes/data locations; access descriptors do not duplicate
+those definitions. Credential provisioning is an explicit M1 design input,
 not a secret field to improvise in the sample TOML.
 
 Start with a small host-local registry with atomic updates and per-environment locks,

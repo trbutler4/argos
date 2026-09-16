@@ -132,15 +132,19 @@ report whether the host is ready for those future steps.
 ### Slice 8: local VM create/list/start/shell/tmux/stop scaffold
 
 Implemented interface: `argos vm list [--json] [--state-dir PATH]`,
-`argos vm create NAME [--repo REPO] [--dry-run]`, `argos vm start ID`,
-`argos vm shell ID`, `argos vm tmux ID`, and `argos vm stop ID`. `create` and `start` accept `--config` and use
-`[vm.guest_tmux]` `config_text` or `config_path` to install a guest tmux config.
+`argos vm create NAME [--repo REPO] [--profile PATH] [--dry-run]`,
+`argos vm show ID`, `argos vm start ID`, `argos vm shell ID`,
+`argos vm tmux ID`, and `argos vm stop ID`. `create` can read a repo
+`.argos.toml` or explicit `--profile` with guest packages and guest ports;
+`create` and `start` accept `--config` and use `[vm.guest_tmux]` `config_text`
+or `config_path` to install a guest tmux config.
 This is conservative host-local VM lifecycle scaffolding. `list` reads versioned JSON VM records from the host Argos state directory under
 `vms/*.json`, returns a stable schema versioned snapshot, sorts records by ID,
 treats missing state as an empty list, and rejects malformed state. `create`
 writes one VM record, creates per-VM instance/work directories, optionally
-performs a separate `git clone`, and renders a microVM config plus instance
-flake. `start` builds the runner from that instance flake, launches it in a
+performs a separate `git clone`, allocates stable per-instance host loopback
+ports for any profile guest ports, and renders a microVM config plus instance
+flake. `show` reports one record with packages and loopback links. `start` builds the runner from that instance flake, launches it in a
 dedicated host tmux console session, waits for the guest readiness marker, and
 records PID/log/session/SSH metadata and rewrites the generated microVM config
 from the selected Argos config so guest tmux settings can change between starts.
@@ -148,10 +152,11 @@ from the selected Argos config so guest tmux settings can change between starts.
 SSHes into `tmux new -A -s main` inside the guest, and `stop` terminates the
 recorded local process while keeping persistent instance data.
 
-Boundaries: no remote VM placement, no systemd user units, no port-collision
-recovery, no richer guest project setup, and no state migration exist in this
-slice. Future lifecycle commands should consume this state shape after they have
-successfully completed their host-side action.
+Boundaries: no remote VM placement, no systemd user units, no Tailscale HTTPS
+names, no project process management, and no state migration exist in this slice.
+Repo profiles install packages and expose ports only. Future lifecycle commands
+should consume this state shape after they have successfully completed their
+host-side action.
 
 Release boundaries: **M0a (CLI) is the first usable release** without VM/browser
 features. **M0b adds the full-screen TUI over CLI JSON output.**

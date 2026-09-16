@@ -10,19 +10,22 @@ attachable entry points, JSON output, strict private TOML inventory, host
 filtering, deadlines, a `tui` browser that separates host sessions from VMs and
 hands Enter to the sessions layer, and a read-only `host status` helper for
 installed host instances. VMs are isolated environments:
-`vm list` reads local VM state, `vm create` writes local state/workdir scaffolds
-and optional guest tmux config from `[vm.guest_tmux]`, `vm start`/`vm stop` run
-the local microVM process from that state, and `vm shell`/`vm tmux` SSH into the
-guest. Sessions are entry points: `sessions attach host:<host>:<session>` enters
-unmanaged host tmux, while `sessions attach vm:<id>` enters guest-owned tmux.
-`examples/config.toml` is active inventory schema, while
-`examples/environment-proposal.toml` is a future proposal. Do not mark
-implementation milestones complete from documentation checks.
+`vm list` reads local VM state, `vm create` writes local state/workdir scaffolds,
+optionally clones a repo, applies a `.argos.toml` or `--profile` package/port
+profile, and optional guest tmux config from `[vm.guest_tmux]`. `vm start`/`vm
+stop` run the local microVM process from that state, `vm show` reports packages
+and loopback links, and `vm shell`/`vm tmux` SSH into the guest. Sessions are
+entry points: `sessions attach host:<host>:<session>` enters unmanaged host tmux,
+while `sessions attach vm:<id>` enters guest-owned tmux. `examples/config.toml`
+is active inventory schema, while `examples/environment-proposal.toml` is a
+future proposal. Do not mark implementation milestones complete from
+documentation checks.
 
 ## Keep the design focused
 
-- Reuse SSH, tmux, NixOS/systemd and devenv. Do not replace their core functions.
+- Reuse SSH, tmux, NixOS/systemd and repo-native tools. Do not replace their core functions.
 - VMs own isolated development environments; sessions are only attachable entry points into host or VM tmux.
+- Argos may install packages and forward declared ports, but it is not a project process manager.
 - Each task VM stays on its home machine and has a separate clone and persistent data.
 - No live migration, automatic synchronization, public ingress, multi-tenant control
   plane or general distribution-packaging effort.

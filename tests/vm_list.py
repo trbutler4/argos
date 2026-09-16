@@ -85,17 +85,38 @@ def main():
         inline_config.write_text(config_text('config_text = "set -g status-right inline"'))
         bad_tmux_config = root / "argos-bad-tmux.toml"
         bad_tmux_config.write_text(config_text(f'config_text = "a"\nconfig_path = "{tmux_conf}"'))
+        profile = root / "repo.argos.toml"
+        profile.write_text('''[workspace]
+workdir = "/workspace/repo"
+
+[vm]
+packages = ["go", "just"]
+
+[[ports]]
+name = "api"
+guest = 3001
+
+[[ports]]
+name = "web"
+guest = 5173
+''')
+        bad_profile = root / "bad.argos.toml"
+        bad_profile.write_text('[vm]\npackages = ["../nope"]\n')
         source = root / "source.git"
         init = run("git", "init", "--bare", str(source))
         assert init.returncode == 0, init.stderr
-        dry = run(str(BINARY), "vm", "create", "Trade Feature", "--repo", str(source), "--project", "trade", "--state-dir", str(create_state), "--work-root", str(work_root), "--dry-run", "--json")
+        dry = run(str(BINARY), "vm", "create", "Trade Feature", "--repo", str(source), "--project", "trade", "--state-dir", str(create_state), "--work-root", str(work_root), "--profile", str(profile), "--dry-run", "--json")
         assert dry.returncode == 0, dry.stderr
         dry_value = json.loads(dry.stdout)
         assert dry_value["dry_run"] is True and dry_value["record"]["id"] == "trade-feature"
+        assert dry_value["record"]["packages"] == ["go", "just"]
+        assert [port["guest"] for port in dry_value["record"]["ports"]] == [3001, 5173]
         assert not create_state.exists(), "dry-run wrote state"
         invalid_config = run(str(BINARY), "vm", "create", "bad config", "--state-dir", str(create_state), "--config", str(bad_tmux_config), "--json")
         assert invalid_config.returncode == 2 and "vm.guest_tmux" in invalid_config.stderr
-        created = run(str(BINARY), "vm", "create", "Trade Feature", "--repo", str(source), "--project", "trade", "--state-dir", str(create_state), "--work-root", str(work_root), "--config", str(argos_config), "--json")
+        invalid_profile = run(str(BINARY), "vm", "create", "bad profile", "--state-dir", str(create_state), "--profile", str(bad_profile), "--json")
+        assert invalid_profile.returncode == 1 and "invalid repo profile" in invalid_profile.stderr
+        created = run(str(BINARY), "vm", "create", "Trade Feature", "--repo", str(source), "--project", "trade", "--state-dir", str(create_state), "--work-root", str(work_root), "--config", str(argos_config), "--profile", str(profile), "--json")
         assert created.returncode == 0, created.stderr
         value = json.loads(created.stdout)
         assert value["dry_run"] is False
@@ -112,8 +133,18 @@ def main():
         assert 'image = "nix-store-overlay.img"' in microvm_text
         assert 'mountPoint = "/workspace"' in microvm_text
         assert f'source = "{work_root}/trade-feature"' in microvm_text
+        assert 'environment.systemPackages = with pkgs; [ git tmux openssh go just ];' in microvm_text
+        assert 'networking.firewall.allowedTCPPorts = [ 22 3001 5173 ];' in microvm_text
+        assert 'guest.port = 3001;' in microvm_text
+        assert 'guest.port = 5173;' in microvm_text
         assert 'environment.etc."argos/tmux.conf".source = ./guest-tmux.conf' in microvm_text
         assert (Path(value["microvm_config"]).parent / "guest-tmux.conf").read_text() == tmux_conf.read_text()
+        assert value["record"]["profile_path"] == str(profile)
+        assert value["record"]["guest_workdir"] == "/workspace/repo"
+        assert value["record"]["packages"] == ["go", "just"]
+        assert [port["name"] for port in value["record"]["ports"]] == ["api", "web"]
+        assert [port["guest"] for port in value["record"]["ports"]] == [3001, 5173]
+        assert len({port["host"] for port in value["record"]["ports"]}) == 2
         assert value["record"]["ssh_host"] == "127.0.0.1"
         assert value["record"]["ssh_user"] == "root"
         assert isinstance(value["record"]["ssh_port"], int)
@@ -122,6 +153,18 @@ def main():
         listed = json.loads(run(str(BINARY), "vm", "list", "--state-dir", str(create_state), "--json").stdout)
         assert [vm["id"] for vm in listed["vms"]] == ["trade-feature"]
         assert listed["vms"][0]["status"] == "created"
+        show_json = run(str(BINARY), "vm", "show", "trade-feature", "--state-dir", str(create_state), "--json")
+        assert show_json.returncode == 0, show_json.stderr
+        shown = json.loads(show_json.stdout)
+        assert shown["record"]["ports"] == value["record"]["ports"]
+        show_human = run(str(BINARY), "vm", "show", "trade-feature", "--state-dir", str(create_state))
+        assert show_human.returncode == 0, show_human.stderr
+        assert "links:" in show_human.stdout and "api: http://127.0.0.1:" in show_human.stdout
+        second = run(str(BINARY), "vm", "create", "Trade Feature Two", "--repo", str(source), "--state-dir", str(create_state), "--work-root", str(work_root), "--profile", str(profile), "--json")
+        assert second.returncode == 0, second.stderr
+        second_value = json.loads(second.stdout)
+        assert {p["guest"] for p in second_value["record"]["ports"]} == {3001, 5173}
+        assert {p["host"] for p in second_value["record"]["ports"]}.isdisjoint({p["host"] for p in value["record"]["ports"]})
         duplicate = run(str(BINARY), "vm", "create", "Trade Feature", "--state-dir", str(create_state), "--json")
         assert duplicate.returncode == 1 and "already exists" in duplicate.stderr
         bad_args = run(str(BINARY), "vm", "create", "bad", "--id", "bad/slash", "--state-dir", str(create_state), "--json")
