@@ -136,11 +136,6 @@ pub(crate) struct StopOptions {
     pub(crate) json: bool,
 }
 
-pub(crate) struct ConsoleOptions {
-    pub(crate) id: String,
-    pub(crate) state_dir: Option<PathBuf>,
-}
-
 pub(crate) struct GuestCommandOptions {
     pub(crate) id: String,
     pub(crate) state_dir: Option<PathBuf>,
@@ -234,17 +229,6 @@ pub(crate) fn stop(options: StopOptions) -> ExitCode {
         print_stop(&output);
     }
     ExitCode::SUCCESS
-}
-
-pub(crate) fn console(options: ConsoleOptions) -> ExitCode {
-    match attach_console(options) {
-        Ok(code) => code,
-        Err(error) => {
-            eprintln!("error: {}: {}", error.code, error.message);
-            let code = if error.code == "invalid_args" { 2 } else { 1 };
-            ExitCode::from(code)
-        }
-    }
 }
 
 pub(crate) fn guest_command(options: GuestCommandOptions) -> ExitCode {
@@ -725,71 +709,6 @@ fn build_runner(instance_dir: &Path) -> Result<PathBuf, VmError> {
         });
     }
     Ok(out_link)
-}
-
-fn attach_console(options: ConsoleOptions) -> Result<ExitCode, VmError> {
-    if !valid_id(&options.id) {
-        return Err(invalid_args(
-            "VM id must be 1-64 chars of letters, digits, '_' or '-'",
-        ));
-    }
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        return Err(VmError {
-            code: "console_error",
-            message: "console requires a terminal on stdin and stdout".into(),
-        });
-    }
-    let state_root = state_root(options.state_dir)?;
-    let state_file = state_root.join("vms").join(format!("{}.json", options.id));
-    let record = load_record(&state_file)?;
-    let session = record
-        .console_session
-        .clone()
-        .unwrap_or_else(|| console_session_name(&record.id));
-    if record.status != "running" || !tmux_session_exists(&session) {
-        return Err(VmError {
-            code: "not_running",
-            message: format!(
-                "VM is not running with an attachable console: {}",
-                record.id
-            ),
-        });
-    }
-    if std::env::var("TMUX").is_ok_and(|value| !value.is_empty()) {
-        let status = Command::new("tmux")
-            .args(["switch-client", "-t", &session])
-            .status()
-            .map_err(|error| VmError {
-                code: "console_error",
-                message: format!("cannot execute tmux switch-client: {error}"),
-            })?;
-        return Ok(if status.success() {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::from(1)
-        });
-    }
-    let mut command = Command::new("tmux");
-    command.args(["-u", "-N", "attach-session", "-t", &session]);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        let error = command.exec();
-        eprintln!("error: cannot execute tmux attach-session: {error}");
-        Ok(ExitCode::from(1))
-    }
-    #[cfg(not(unix))]
-    {
-        let status = command.status().map_err(|error| VmError {
-            code: "console_error",
-            message: format!("cannot execute tmux attach-session: {error}"),
-        })?;
-        Ok(if status.success() {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::from(1)
-        })
-    }
 }
 
 fn run_guest_command(options: GuestCommandOptions) -> Result<ExitCode, VmError> {

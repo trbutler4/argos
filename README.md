@@ -3,17 +3,17 @@
 A command center for NixOS machines: **Rust CLI first, then a full-screen
 TUI consuming its structured output**.
 
-**One place to find a running task, attach to its tmux session, and open its app,
-regardless of which machine hosts it.** New tasks can get their own NixOS VM,
-separate Git clone, toolchain, backend processes, and database state.
+**One place to create and enter isolated project VMs.** New tasks can get their
+own NixOS VM, separate Git clone, toolchain, backend processes, tmux session,
+and database state.
 
-Status: **multi-machine CLI discovery with a simple TUI browser**. Local and SSH tmux listing
-use a private machine inventory, bounded concurrency and per-host deadlines.
-Local and SSH tmux attachment are available. The TUI provides session browsing,
-refresh, keyboard navigation, and Enter-to-attach terminal handoff. A first
-microvm.nix QEMU prototype builds and boots, and `argos host status` / `argos hosts status` report
-installed-host VM readiness. VM SSH, project setup and environment management
-commands are not implemented. No remote installation or provisioning is performed.
+Status: **host discovery plus local VM lifecycle**. Local and SSH tmux listing
+use a private machine inventory, bounded concurrency and per-host deadlines, but
+the development workflow is VM-owned tmux via `argos vm tmux`. The TUI is a
+read-only browser while the VM workflow takes shape. Local microVMs can be
+created, started, stopped, entered over SSH, and given a project workspace at
+`/workspace/repo` with `nix develop` support. No remote installation or
+provisioning is performed.
 
 ## Try the CLI
 
@@ -44,36 +44,9 @@ argos tui --config /path/inventory.toml
 argos tui --config ./config.local.toml
 ```
 
-The first TUI slice stays simple. It shows discovered hosts and sessions, supports
-`j`/`k` or arrow navigation, `r` to refresh, `q` to quit, and Enter to attach.
-When attaching, Argos exits the TUI first and hands the terminal to the existing
-`attach` path, so tmux/SSH owns the terminal rather than being nested inside the
-TUI process.
-
-### Attach to a local session
-
-```sh
-argos attach 'session name'
-argos attach '$4' --config /path/inventory.toml
-```
-
-Targets are exact session names or IDs from `list --json`, never prefixes or patterns.
-Quote IDs so the shell does not expand `$`. Attachment selects the configured client
-machine by default, not every machine in the inventory. `--host` can explicitly
-select that local machine. Remote hosts require `--host HOST_ID` and a configured `ssh_alias`; Argos first
-discovers the exact session ID, then attaches over SSH. `--config`, `--local` and
-`--socket` use the same config-selection conventions as `list`.
-
-- From a plain terminal, Argos hands the terminal to native tmux. Detach using your
-  existing tmux prefix followed by `d`. Shells and backends keep running.
-- Inside the same local tmux server, Argos switches the invoking session's sole attached
-  client instead of nesting tmux. It does not detach other clients on the target.
-- For a remote host from inside local tmux, Argos opens a local connection window
-  named `argos:<host>:<session>` running SSH and remote tmux. Detaching that remote
-  tmux client closes the connection window; it does not kill the remote session.
-- If multiple clients are attached to the invoking session, Argos refuses to guess
-  which terminal to switch. Cross-server nesting is also refused in this slice.
-- Attachment is interactive, not JSON output. It requires a real TTY in either mode.
+The first TUI slice stays simple and read-only. It shows discovered hosts and
+sessions, supports `j`/`k` or arrow navigation, `r` to refresh, and `q` to quit.
+Interactive development entry goes through VM-owned tmux with `argos vm tmux`.
 
 For development, build and run directly without a NixOS rebuild:
 
@@ -81,8 +54,7 @@ For development, build and run directly without a NixOS rebuild:
 nix develop --command cargo build --locked
 ./target/debug/argos list --config ./config.local.toml
 ./target/debug/argos tui --config ./config.local.toml
-./target/debug/argos attach 'local-session' --config ./config.local.toml
-./target/debug/argos attach 'remote-session' --config ./config.local.toml --host REMOTE_HOST
+./target/debug/argos vm tmux my-project --state-dir /absolute/test/state
 ```
 
 `config.local.toml` is gitignored and directly editable. Pass it explicitly to keep
@@ -117,9 +89,8 @@ inline `config_text` or `config_path` contents as `/etc/tmux.conf` inside the
 guest. The VM mounts the per-VM work directory at `/workspace`, so a cloned
 repo is available at `/workspace/repo`. `shell` and `tmux` start there by
 default. Guests include flakes, a writable Nix store overlay, and enough default
-memory for small `nix develop` workflows. `console` remains the serial console
-fallback. `stop` terminates the recorded local process and keeps persistent
-instance data.
+memory for small `nix develop` workflows. `stop` terminates the recorded local
+process and keeps persistent instance data.
 
 ```sh
 argos vm list
@@ -129,7 +100,6 @@ argos vm create "Trade Feature" --repo /path/or/git-url --dry-run --json
 argos vm start trade-feature --config ./config.local.toml
 argos vm shell trade-feature
 argos vm tmux trade-feature
-argos vm console trade-feature
 argos vm stop trade-feature
 argos vm list --state-dir /absolute/test/state --json
 ```
@@ -137,7 +107,7 @@ argos vm list --state-dir /absolute/test/state --json
 State records live under `$ARGOS_STATE_DIR/vms/*.json`, otherwise
 `$XDG_STATE_HOME/argos/vms/*.json` or `~/.local/state/argos/vms/*.json`.
 Generated instance scaffolds live under `instances/`, and default work clones
-under `workdirs/`. VM start/shell/tmux/console/stop is local-only for now.
+under `workdirs/`. VM start/shell/tmux/stop is local-only for now.
 Remote placement, port-collision handling and project setup come later.
 
 Optional config:
@@ -215,13 +185,11 @@ python3 tests/vm_list.py
 python3 tests/local_tmux.py
 python3 tests/config_cli.py
 python3 tests/remote_ssh.py
-python3 tests/attach_tmux.py
-python3 tests/remote_attach.py
 python3 tests/tui.py
 ```
 
-The integration test uses a disposable real tmux server on a unique socket and
-only cleans up that server. It never kills or modifies your existing sessions.
+The integration tests use disposable real tmux servers on unique sockets and only
+clean up those servers. They never kill or modify your existing sessions.
 The SSH test uses a real rootless loopback sshd and real tmux with disposable keys
 and trust files. A temporary PATH adapter supplies the test SSH configuration to
 the real SSH executable. It does not fake responses or modify user SSH settings.
@@ -293,11 +261,11 @@ tmux is reported explicitly. No credentials belong in this inventory.
 ```text
 argos
   workstation                                     online
-    config            host tmux     attached
+    config            host tmux     listed
     app-feature       VM running    stack ready       [app]
     app-fix           VM running    stack starting
   server                                          online
-    experiments       host tmux     detached
+    experiments       host tmux     listed
   laptop                                          unreachable · last seen 12m ago
     docs              host tmux     last observed running
 ```
@@ -306,8 +274,9 @@ All host and project names in examples are fictional. Do not infer LLM activity
 from a process merely being alive. Offline hosts have unknown current state,
 not a fabricated stopped state.
 
-Actions: search, attach, open service, inspect logs/status, and, for **managed task
-VMs only**, create/start/stop. Deleting an environment is a separate confirmed action.
+Actions: search, enter VM tmux, open service, inspect logs/status, and, for
+**managed task VMs only**, create/start/stop. Deleting an environment is a
+separate confirmed action.
 
 An environment is not a machine and a session is not an environment:
 
@@ -317,7 +286,7 @@ machine: stable NixOS host, reachable through its existing SSH alias
     session: persistent tmux shell, agent, or interactive tool
 ```
 
-Existing host tmux sessions can be listed and attached without registering a project.
+Existing host tmux sessions can be listed without registering a project.
 
 ## Proposed command surface
 
@@ -328,38 +297,40 @@ argos                              # CLI help initially
 argos tui                          # full-screen TUI, added after the CLI
 argos list                         # human-readable hosts and sessions
 argos list --json                  # structured snapshot for the TUI/scripts
-argos attach <machine/session>     # attach an existing session
-argos env create <project> --host <machine> --name <task>
-argos env start <machine/environment>
-argos env stop <machine/environment>
+argos vm create <name> --repo <repo>
+argos vm start <id>
+argos vm tmux <id>                 # enter VM-owned tmux
+argos vm stop <id>
 argos open <machine/environment> [service]
 argos env inspect <machine/environment>
 argos env destroy <machine/environment>  # explicit destructive confirmation
 ```
 
-Local/SSH `list`, JSON output, filtering, local/SSH `attach`, the first read-only TUI browser, and help are implemented today. Other commands
-are proposed, not installed commands. `start` will boot a stopped VM.
+Local/SSH `list`, JSON output, filtering, the first read-only TUI browser,
+local VM lifecycle and VM-owned tmux entry are implemented today. Other commands
+are proposed, not installed commands. `start` boots a stopped VM.
 It does **not** restore process memory. Detach/switch to keep agents and backends
 running; stopping a VM ends its processes while retaining its disk.
 
 ## Build order
 
 1. **Connect to existing work, CLI first.** M0a delivers Rust commands for listing
-   and attaching to tmux sessions on two real hosts, with human and JSON output.
-   M0b adds the full-screen TUI as a consumer of those commands. Disconnecting the
-   client never kills the remote session.
+tmux sessions on two real hosts, with human and JSON output. M0b adds the
+full-screen TUI as a consumer of those commands. Disconnecting the client never
+kills a VM-owned session.
 2. **Prove the isolated task environment.** Run two real project stacks in two
    separate-clone VMs on one host, using the same internal ports and independent
    database data. Validate tooling persistence across a reboot.
 3. **Join the two workflows.** Create and operate managed environments from the same
-   interface, attach through the host, and open each app through a local tunnel.
+   interface, enter VM-owned tmux through the host, and open each app through a
+   local tunnel.
 4. **Polish for daily use.** Better status/log views, optional Hyprland launch action,
    stable service origins, and lightweight LLM status hooks where actually supported.
 
 Do not build a generic orchestration framework before the first two milestones work.
 
-**First usable release: M0a, the cross-machine tmux CLI.** M0b layers the TUI on
-top. Neither requires VMs or browser access. **Initial full task-environment workflow: M2**, after the M1 VM
+**First usable release: local VM lifecycle plus VM-owned tmux entry.** The TUI layers on
+top as a browser and launcher. **Initial full task-environment workflow: M2**, after the M1 VM
 proof. M3 is optional polish, not part of either completion boundary.
 
 ## Design choices and open decisions

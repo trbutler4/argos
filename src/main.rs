@@ -6,7 +6,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-mod attach;
 mod config;
 mod host;
 mod tmux;
@@ -25,18 +24,6 @@ enum Command {
     List {
         #[arg(long)]
         json: bool,
-        #[arg(long, value_name="PATH", conflicts_with_all=["config", "host", "local"])]
-        socket: Option<String>,
-        #[arg(long, value_name="PATH", conflicts_with_all=["socket", "local"])]
-        config: Option<std::path::PathBuf>,
-        #[arg(long, value_name="ID", conflicts_with_all=["socket", "local"])]
-        host: Option<String>,
-        #[arg(long, conflicts_with_all=["socket", "config", "host"])]
-        local: bool,
-    },
-    /// Attach to an exact tmux session name or ID.
-    Attach {
-        session: String,
         #[arg(long, value_name="PATH", conflicts_with_all=["config", "host", "local"])]
         socket: Option<String>,
         #[arg(long, value_name="PATH", conflicts_with_all=["socket", "local"])]
@@ -145,19 +132,13 @@ enum VmCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Attach to a local VM's console session.
-    Console {
-        id: String,
-        #[arg(long, value_name = "PATH")]
-        state_dir: Option<std::path::PathBuf>,
-    },
     /// SSH into a local VM guest shell.
     Shell {
         id: String,
         #[arg(long, value_name = "PATH")]
         state_dir: Option<std::path::PathBuf>,
     },
-    /// SSH into a local VM guest and attach to its tmux session.
+    /// SSH into a local VM guest and join its tmux session.
     Tmux {
         id: String,
         #[arg(long, value_name = "PATH")]
@@ -205,13 +186,6 @@ fn main() -> ExitCode {
             host,
             local,
         } => run_list(json, socket, config, host, local),
-        Command::Attach {
-            session,
-            socket,
-            config,
-            host,
-            local,
-        } => attach::run(&session, socket, config, host, local),
         Command::Tui {
             socket,
             config,
@@ -273,9 +247,6 @@ fn main() -> ExitCode {
                 state_dir,
                 json,
             }),
-            VmCommand::Console { id, state_dir } => {
-                vm::console(vm::ConsoleOptions { id, state_dir })
-            }
             VmCommand::Shell { id, state_dir } => vm::guest_command(vm::GuestCommandOptions {
                 id,
                 state_dir,

@@ -18,7 +18,7 @@ The VM details must pass
 
 **Build the Rust CLI first (M0a), then the full-screen TUI (M0b).** Rust is chosen
 for learning, not a demonstrated performance need. The CLI is the canonical interface
-for discovery, attachment and later lifecycle operations. The TUI invokes those
+for discovery and lifecycle operations. The TUI invokes those
 commands and renders their structured results; it does not parse pretty tables or
 implement a second SSH/VM control path. No local HTTP service is needed between them.
 
@@ -36,9 +36,8 @@ implement a second SSH/VM control path. No local HTTP service is needed between 
 - The TUI launches the installed CLI via an explicit executable path and argument
   array, using the same config as the user. Never interpolate labels into shell code.
   Begin with bounded refresh/polling; a live event stream is not required for M0.
-- Interactive `attach` is not a JSON operation. The TUI restores/releases its terminal
-  before handing control to the CLI/SSH/tmux PTY, then redraws on return. Do not capture
-  and render a remote terminal session as if it were a JSON result.
+- Interactive terminal entry is VM-owned tmux through `argos vm tmux`, not a JSON operation.
+  Do not capture and render a remote terminal session as if it were a JSON result.
 - Later mutations stay CLI-owned, including validation and destructive confirmation.
   A canceled TUI must not kill remote services or abandon a supervised host operation.
 
@@ -49,8 +48,8 @@ browser/desktop management UI is planned; opening a project app in a browser rem
 a separate action. Machine/session access works over SSH without Hyprland.
 
 Proposed TUI layout: machine/session list, selected-item details, search/filter and a
-contextual action/help bar. M0b needs keyboard navigation, live reachability/attachment
-status, readable errors and a reliable attach/return flow. Support terminal resizing
+contextual action/help bar. M0b needs keyboard navigation, live reachability
+status, readable errors and a clear VM tmux entry flow. Support terminal resizing
 and a usable compact layout. Specific widgets and keybindings remain design choices.
 A slow host probe must not block input or redraws. The TUI may run in a tmux window
 or be launched in a sufficiently large popup, but the popup is not the product itself.
@@ -65,7 +64,7 @@ user's SSH config. Do not scan or enroll every tailnet member automatically.
 - MVP queries the user's default tmux server. Explicit named sockets can be added
   when needed; do not enumerate other users' servers.
 - Discover ordinary sessions without requiring a argos registry or repo marker.
-- Resolve the current machine locally, so attaching its local sessions need not use SSH.
+- Resolve the current machine locally, so local helper commands need not use SSH.
 - Probe hosts concurrently, with bounded fan-out and a per-host connection timeout.
 - Distinguish offline, authentication failure, untrusted host key, missing tmux,
   no tmux server/sessions, and a failed command. A failed probe is not an empty list.
@@ -77,25 +76,23 @@ Use native command output formats, validate parsing, and keep remote command
 construction separate from display labels. Session names, paths, and branch names
 must not become unescaped shell code. No executable snippets in untrusted discovery data.
 
-## 3. tmux connection UX
+## 3. VM tmux connection UX
 
 Do not embed tmux rendering in a homegrown terminal widget. Let the user's terminal
-and SSH PTY carry the interactive session.
+and SSH PTY carry the interactive session. The normal interactive path is a tmux
+server running inside the project VM.
 
-- Outside tmux: selecting an item can hand the terminal to an SSH/tmux attachment;
-  detaching returns to argos with the terminal restored.
-- Inside local tmux: switch-client for a session on that same server, avoiding nesting.
-- For a remote session: use/reuse a dedicated local connection window. A short-lived
-  picker popup must not own the remote process lifetime or become its only access path.
-- Keep an easy route back to the hub/picker and label connections with their host.
-- Disconnecting or closing a connection window must only detach. Do not use tmux
-  attach flags that detach other clients by default, kill sessions, or restart shells.
+- `argos vm tmux ID` SSHes into the guest and joins `tmux new -A -s main`.
+- Host tmux may wrap the terminal, but it is not the project session owner.
+- The TUI should eventually show VM rows and dispatch to the same VM-owned tmux path.
+- Keep an easy route back to the hub/picker and label VM sessions with their host/project.
+- Disconnecting or closing a VM tmux client must not kill sessions or restart shells.
 
 Preserve the user's existing tmux prefix, pane navigation and clipboard bindings.
 Remote tmux may be nested under local tmux, so prefix forwarding, returning to the
 hub, OSC 52 clipboard and resize need real tests rather than assumptions.
 
-If two clients attach to the same session, accept tmux's native behavior and make
+If two clients join the same session, accept tmux's native behavior and make
 it visible. Do not mistake multiple clients for duplicate environments.
 
 ## 4. A managed task environment

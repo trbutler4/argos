@@ -66,7 +66,7 @@ def main():
             while time.monotonic() < deadline:
                 drain(master, output)
                 text = output.decode(errors="ignore")
-                if all(token in text for token in ("Argos", "tui", "target", "refresh", "quit", "Enter")):
+                if all(token in text for token in ("Argos", "tui", "target", "refresh", "quit", "read-only")):
                     return
                 time.sleep(0.05)
             raise AssertionError(output.decode(errors="ignore"))
@@ -93,41 +93,9 @@ def main():
             os.close(master)
             os.close(slave)
 
-        process, master, slave, original, output = terminal()
-        try:
-            wait_rendered(master, output)
-            os.write(master, b"\r")
-            deadline = time.monotonic() + 6
-            while time.monotonic() < deadline:
-                drain(master, output)
-                clients = run(*tmux, "list-clients", "-F", "#{client_pid}|#{session_id}", env=env)
-                if clients.returncode == 0 and f"{process.pid}|{session_id}" in clients.stdout:
-                    break
-                time.sleep(0.05)
-            else:
-                raise AssertionError("TUI Enter did not hand terminal to tmux attach")
-            assert "\x1b[?1049l" in output.decode(errors="ignore"), "TUI did not leave alternate screen before attach"
-            os.write(master, b"\x02d")
-            deadline = time.monotonic() + 4
-            while time.monotonic() < deadline and process.poll() is None:
-                drain(master, output)
-                time.sleep(0.05)
-            assert process.poll() is not None, "tmux attach did not detach after prefix-d"
-            assert process.returncode == 0
-            assert termios.tcgetattr(slave) == original, "terminal attributes not restored after TUI attach"
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-            os.close(master)
-            os.close(slave)
-            run(*tmux, "kill-server", env=env)
+        run(*tmux, "kill-server", env=env)
     print("PASS: real PTY TUI renders sessions, handles navigation/refresh/quit,")
-    print("      exits before attach handoff, and restores terminal mode.")
+    print("      remains read-only, and restores terminal mode.")
 
 
 if __name__ == "__main__":

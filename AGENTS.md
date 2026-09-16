@@ -6,30 +6,30 @@ Read README.md, docs/architecture.md and docs/plan.md before implementation.
 ## Current phase
 
 The Rust CLI implements local/SSH `list`, JSON output, strict private TOML
-inventory, host filtering, deadlines, local/SSH `attach`, a simple `tui` session
-browser with Enter-to-attach handoff, and a read-only `host status` helper for
-installed host instances. `vm list` reads local VM state, `vm create` writes local state/workdir scaffolds and optional guest tmux config from `[vm.guest_tmux]`, `vm start`/`vm stop` run the local microVM process from that state, `vm shell`/`vm tmux` SSH into the guest, and `vm console` attaches to the host tmux-backed serial console session. A first microvm.nix QEMU runner-package prototype builds
-and boots, but remote VM placement, project setup and `env` commands are not implemented.
-`--local`/`--socket` bypass implicit inventory. `attach` supports exact local/SSH
-session targeting, safe same-server client switching, and remote connection windows
-from inside local tmux. `examples/config.toml` is active
-inventory schema, while `examples/environment-proposal.toml` is a future proposal.
-Do not mark implementation milestones complete from documentation checks.
+inventory, host filtering, deadlines, a read-only `tui` session browser, and a
+read-only `host status` helper for installed host instances. `vm list` reads
+local VM state, `vm create` writes local state/workdir scaffolds and optional
+guest tmux config from `[vm.guest_tmux]`, `vm start`/`vm stop` run the local
+microVM process from that state, and `vm shell`/`vm tmux` SSH into the guest.
+The intended development entry point is VM-owned tmux with `argos vm tmux`; the
+legacy `attach` command has been removed to keep the workflow focused on
+isolated project VMs. `examples/config.toml` is active inventory schema, while
+`examples/environment-proposal.toml` is a future proposal. Do not mark
+implementation milestones complete from documentation checks.
 
 ## Keep the design focused
 
 - Reuse SSH, tmux, NixOS/systemd and devenv. Do not replace their core functions.
-- Support existing host tmux sessions before requiring managed VMs.
+- The normal interactive development path is a VM-owned tmux session per project.
 - Each task VM stays on its home machine and has a separate clone and persistent data.
 - No live migration, automatic synchronization, public ingress, multi-tenant control
   plane or general distribution-packaging effort.
-- Build the Rust CLI first (M0a), then a full-screen Rust TUI (M0b) consuming CLI
-  JSON output. The CLI is the canonical operational interface, not just a diagnostic
-  companion. The TUI framework remains open.
-  Prefer straightforward idiomatic Rust, explain important ownership/concurrency
-  tradeoffs briefly, and avoid unnecessary generics, unsafe code or performance tuning.
-  Never parse human-readable CLI tables in the TUI or duplicate SSH/tmux/lifecycle
-  logic there. Interactive attach uses real terminal handoff, not JSON output.
+- Build the Rust CLI first, then a full-screen Rust TUI consuming CLI JSON output.
+  The CLI is the canonical operational interface, not just a diagnostic companion.
+  The TUI framework remains open. Prefer straightforward idiomatic Rust, explain
+  important ownership/concurrency tradeoffs briefly, and avoid unnecessary generics,
+  unsafe code or performance tuning. Never parse human-readable CLI tables in the TUI
+  or duplicate SSH/tmux/lifecycle logic there.
 - Project/host names in mockups are illustrative. Do not silently pick `example-app` or
   connect to/provision hosts merely because they appear in an example.
 
@@ -49,9 +49,8 @@ Do not mark implementation milestones complete from documentation checks.
 - Commit focused changes. Enter `nix develop`, then run `cargo fmt --check`,
   `cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`,
   `cargo build --locked`, `python3 tests/host_status.py`,
-  `python3 tests/vm_list.py`, `python3 tests/local_tmux.py`, and
+  `python3 tests/vm_list.py`, `python3 tests/local_tmux.py`,
   `python3 tests/config_cli.py`, `python3 tests/remote_ssh.py`, and
-  `python3 tests/attach_tmux.py`, `python3 tests/remote_attach.py`, and
   `python3 tests/tui.py`.
 
 ## Public repository boundary

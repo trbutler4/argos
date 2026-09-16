@@ -66,7 +66,7 @@ Add an SSH-enabled local-only prototype without committing secrets:
 3. Boot the VM from a managed runtime directory.
 4. Verify `ssh -p <forwarded-port> argos@127.0.0.1 true` with strict host-key
    checking and a stable `HostKeyAlias`.
-5. Start a guest tmux session and prove Argos can discover or attach through the
-   forwarded SSH path.
+5. Start a guest tmux session and prove Argos can enter it through the forwarded
+   SSH path.
 
-Only after that should Argos grow `env create/start/status/attach` commands.
+Only after that should Argos grow VM create/start/status commands.

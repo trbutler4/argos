@@ -170,8 +170,6 @@ out.symlink_to(runner)
         assert Path(start_value["log_path"]).read_text().count("ARGOS_VM_READY id=trade-feature") == 1
         assert (Path(value["microvm_config"]).parent / "guest-tmux.conf").read_text() == "set -g status-right inline"
         assert run("tmux", "has-session", "-t", "argos-vm-trade-feature").returncode == 0
-        console = run(str(BINARY), "vm", "console", "trade-feature", "--state-dir", str(create_state))
-        assert console.returncode == 1 and "requires a terminal" in console.stderr
         shell = run(str(BINARY), "vm", "shell", "trade-feature", "--state-dir", str(create_state))
         assert shell.returncode == 1 and "requires a terminal" in shell.stderr
         guest_tmux = run(str(BINARY), "vm", "tmux", "trade-feature", "--state-dir", str(create_state))
@@ -193,7 +191,7 @@ out.symlink_to(runner)
         (vms / "bad.json").write_text(json.dumps(record("bad/slash")))
         bad = run(str(BINARY), "vm", "list", "--state-dir", str(state), "--json")
         assert bad.returncode == 1 and "invalid_state" in bad.stderr
-    print("PASS: VM create/start/shell/tmux/console/stop/list manages deterministic local state, guest SSH metadata, guest tmux config injection, tmux console lifecycle, clone/config scaffolds, malformed state, fake local runner lifecycle, and no remote hosts.")
+    print("PASS: VM create/start/shell/tmux/stop/list manages deterministic local state, guest SSH metadata, guest tmux config injection, tmux process lifecycle, clone/config scaffolds, malformed state, fake local runner lifecycle, and no remote hosts.")
 
 
 if __name__ == "__main__":
