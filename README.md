@@ -3,17 +3,19 @@
 A command center for NixOS machines: **Rust CLI first, then a full-screen
 TUI consuming its structured output**.
 
-**One place to create and enter isolated project VMs.** New tasks can get their
-own NixOS VM, separate Git clone, toolchain, backend processes, tmux session,
-and database state.
+**VMs are isolated environments. Sessions are entry points.** New tasks can get
+their own NixOS VM, separate Git clone, toolchain, backend processes, tmux
+session, and database state. Existing host tmux sessions remain useful as
+unmanaged entry points.
 
-Status: **host discovery plus local VM lifecycle**. Local and SSH tmux listing
-use a private machine inventory, bounded concurrency and per-host deadlines, but
-the development workflow is VM-owned tmux via `argos vm tmux`. The TUI is a
-read-only browser while the VM workflow takes shape. Local microVMs can be
-created, started, stopped, entered over SSH, and given a project workspace at
-`/workspace/repo` with `nix develop` support. No remote installation or
-provisioning is performed.
+Status: **remote sessions plus local VM lifecycle**. Local and SSH tmux listing
+use a private machine inventory, bounded concurrency and per-host deadlines.
+`argos sessions attach` enters either an unmanaged host tmux session or a VM-owned
+tmux session (`vm:<id>`). `argos vm ...` creates, starts, stops and configures
+isolated environments. The TUI is a read-only browser while the VM workflow takes
+shape. Local microVMs can be created, started, stopped, entered over SSH, and
+given a project workspace at `/workspace/repo` with `nix develop` support. No
+remote installation or provisioning is performed.
 
 ## Try the CLI
 
@@ -25,8 +27,9 @@ cargo run --quiet --locked -- list --json
 ```
 
 `list` reads your machine inventory when present, otherwise it lists only the local
-default tmux server. Use `list --local` to explicitly stay local, or
-`list --socket /absolute/path --json` for a specific local socket. These local modes
+default tmux server. `sessions list` is the explicit sessions namespace for the
+same host-tmux discovery. Use `--local` to explicitly stay local, or
+`--socket /absolute/path --json` for a specific local socket. These local modes
 bypass implicit inventory loading. Discovery does not create servers or change sessions.
 
 JSON schema version 1 includes `observed_at_unix_ms` and a deterministic list of hosts with
@@ -46,20 +49,44 @@ argos tui --config ./config.local.toml
 
 The first TUI slice stays simple and read-only. It shows discovered hosts and
 sessions, supports `j`/`k` or arrow navigation, `r` to refresh, and `q` to quit.
-Interactive development entry goes through VM-owned tmux with `argos vm tmux`.
+Interactive launch remains separate from the TUI for now and goes through
+`argos sessions attach`.
 
 For development, build and run directly without a NixOS rebuild:
 
 ```sh
 nix develop --command cargo build --locked
-./target/debug/argos list --config ./config.local.toml
+./target/debug/argos sessions list --config ./config.local.toml
+./target/debug/argos sessions attach host:desktop:qvattro --config ./config.local.toml
+./target/debug/argos sessions attach vm:my-project --state-dir /absolute/test/state
 ./target/debug/argos tui --config ./config.local.toml
-./target/debug/argos vm tmux my-project --state-dir /absolute/test/state
 ```
 
 `config.local.toml` is gitignored and directly editable. Pass it explicitly to keep
 development independent of the installed config. Building this binary does not
 update your installed version or NixOS input pin.
+
+### Sessions and environments
+
+Argos keeps two concepts separate in the CLI and code:
+
+- **VMs** are managed isolated environments. Use `argos vm create/start/stop` to
+  control lifecycle and configuration.
+- **Sessions** are attachable entry points. Use `argos sessions attach` to enter
+  either unmanaged host tmux or guest tmux inside a VM.
+
+Examples:
+
+```sh
+argos sessions list --config ./config.local.toml
+argos sessions attach host:desktop:qvattro --config ./config.local.toml
+argos sessions attach qvattro --config ./config.local.toml --host desktop
+argos sessions attach vm:trade-feature
+```
+
+Host sessions are unmanaged: Argos can list and attach, but it does not own their
+lifecycle. VM sessions are backed by the VM record and enter guest-owned tmux over
+SSH, equivalent to `argos vm tmux ID`.
 
 ### Installed host helper
 
@@ -100,6 +127,7 @@ argos vm create "Trade Feature" --repo /path/or/git-url --dry-run --json
 argos vm start trade-feature --config ./config.local.toml
 argos vm shell trade-feature
 argos vm tmux trade-feature
+argos sessions attach vm:trade-feature
 argos vm stop trade-feature
 argos vm list --state-dir /absolute/test/state --json
 ```
@@ -185,11 +213,14 @@ python3 tests/vm_list.py
 python3 tests/local_tmux.py
 python3 tests/config_cli.py
 python3 tests/remote_ssh.py
+python3 tests/attach_tmux.py
+python3 tests/remote_attach.py
 python3 tests/tui.py
 ```
 
 The integration tests use disposable real tmux servers on unique sockets and only
-clean up those servers. They never kill or modify your existing sessions.
+clean up those servers. Session attach tests use real PTYs and disposable local or
+loopback-SSH tmux servers. They never kill or modify your existing sessions.
 The SSH test uses a real rootless loopback sshd and real tmux with disposable keys
 and trust files. A temporary PATH adapter supplies the test SSH configuration to
 the real SSH executable. It does not fake responses or modify user SSH settings.
@@ -274,7 +305,7 @@ All host and project names in examples are fictional. Do not infer LLM activity
 from a process merely being alive. Offline hosts have unknown current state,
 not a fabricated stopped state.
 
-Actions: search, enter VM tmux, open service, inspect logs/status, and, for
+Actions: search, attach to a session, open service, inspect logs/status, and, for
 **managed task VMs only**, create/start/stop. Deleting an environment is a
 separate confirmed action.
 
@@ -286,7 +317,7 @@ machine: stable NixOS host, reachable through its existing SSH alias
     session: persistent tmux shell, agent, or interactive tool
 ```
 
-Existing host tmux sessions can be listed without registering a project.
+Existing host tmux sessions can be listed and attached without registering a project.
 
 ## Proposed command surface
 
@@ -299,15 +330,17 @@ argos list                         # human-readable hosts and sessions
 argos list --json                  # structured snapshot for the TUI/scripts
 argos vm create <name> --repo <repo>
 argos vm start <id>
-argos vm tmux <id>                 # enter VM-owned tmux
+argos sessions attach <target>      # enter host:<host>:<session> or vm:<id>
+argos vm tmux <id>                  # direct alias for VM-owned tmux
 argos vm stop <id>
 argos open <machine/environment> [service]
 argos env inspect <machine/environment>
 argos env destroy <machine/environment>  # explicit destructive confirmation
 ```
 
-Local/SSH `list`, JSON output, filtering, the first read-only TUI browser,
-local VM lifecycle and VM-owned tmux entry are implemented today. Other commands
+Local/SSH `list`, JSON output, filtering, `sessions attach` for host and VM
+sessions, the first read-only TUI browser, local VM lifecycle and VM-owned tmux
+entry are implemented today. Other commands
 are proposed, not installed commands. `start` boots a stopped VM.
 It does **not** restore process memory. Detach/switch to keep agents and backends
 running; stopping a VM ends its processes while retaining its disk.

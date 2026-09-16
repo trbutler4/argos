@@ -8,6 +8,7 @@ use std::{
 
 mod config;
 mod host;
+mod sessions;
 mod tmux;
 mod tui;
 mod vm;
@@ -32,6 +33,11 @@ enum Command {
         host: Option<String>,
         #[arg(long, conflicts_with_all=["socket", "config", "host"])]
         local: bool,
+    },
+    /// Work with attachable sessions, including host tmux and VM tmux.
+    Sessions {
+        #[command(subcommand)]
+        command: SessionsCommand,
     },
     /// Open the interactive terminal UI.
     Tui {
@@ -58,6 +64,37 @@ enum Command {
     Vm {
         #[command(subcommand)]
         command: VmCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionsCommand {
+    /// List host tmux sessions.
+    List {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, value_name="PATH", conflicts_with_all=["config", "host", "local"])]
+        socket: Option<String>,
+        #[arg(long, value_name="PATH", conflicts_with_all=["socket", "local"])]
+        config: Option<std::path::PathBuf>,
+        #[arg(long, value_name="ID", conflicts_with_all=["socket", "local"])]
+        host: Option<String>,
+        #[arg(long, conflicts_with_all=["socket", "config", "host"])]
+        local: bool,
+    },
+    /// Attach to a host tmux session or VM session.
+    Attach {
+        target: String,
+        #[arg(long, value_name="PATH", conflicts_with_all=["config", "host", "local"])]
+        socket: Option<String>,
+        #[arg(long, value_name="PATH", conflicts_with_all=["socket", "local"])]
+        config: Option<std::path::PathBuf>,
+        #[arg(long, value_name="ID", conflicts_with_all=["socket", "local"])]
+        host: Option<String>,
+        #[arg(long, conflicts_with_all=["socket", "config", "host"])]
+        local: bool,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
     },
 }
 
@@ -186,6 +223,30 @@ fn main() -> ExitCode {
             host,
             local,
         } => run_list(json, socket, config, host, local),
+        Command::Sessions { command } => match command {
+            SessionsCommand::List {
+                json,
+                socket,
+                config,
+                host,
+                local,
+            } => run_list(json, socket, config, host, local),
+            SessionsCommand::Attach {
+                target,
+                socket,
+                config,
+                host,
+                local,
+                state_dir,
+            } => sessions::attach(sessions::AttachOptions {
+                target,
+                socket,
+                config_path: config,
+                host,
+                local,
+                state_dir,
+            }),
+        },
         Command::Tui {
             socket,
             config,

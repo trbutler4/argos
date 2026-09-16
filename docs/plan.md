@@ -59,16 +59,23 @@ subprocesses that outlive it are not guaranteed to be terminated in this slice.
 Reader threads never delay return past the deadline. Proxy cleanup needs a dedicated
 process-group follow-up before claiming arbitrary proxy-lifecycle coverage.
 
-M0a has a working CLI path for discovery. Legacy host tmux attachment was exercised and then removed when the product direction shifted to VM-owned tmux. NixOS activation remains user-controlled.
+M0a has a working CLI path for discovery and a separate sessions layer for terminal entry. Host tmux remains unmanaged, while VM tmux belongs to managed environments. NixOS activation remains user-controlled.
 
 
-### Slice 3: legacy host-tmux attachment removed
+### Slice 3: sessions attach layer
 
-The earlier `argos attach` experiment proved PTY handoff and exact tmux targeting,
-but it no longer matches the product direction. The command, implementation and
-attach-only integration tests have been removed. Existing host tmux sessions remain
-observable through `list` and the read-only TUI, but interactive development entry
-is intentionally VM-owned tmux via `argos vm tmux ID`.
+Implemented interface: `argos sessions list` for explicit host-tmux discovery and
+`argos sessions attach TARGET` for terminal entry. Targets are typed at the edge:
+`host:<host>:<session>` or `SESSION --host HOST` routes to unmanaged host tmux,
+while `vm:<id>` routes to guest-owned tmux, equivalent to `argos vm tmux ID`.
+This keeps VMs as lifecycle-managed environments and sessions as attachable entry
+points.
+
+Verified: real PTY local tmux tests exercise exact name/ID selection, same-server
+switching, ambiguous/cross-server refusal, detach, terminal restoration and
+unchanged panes. Real loopback SSH tests exercise remote host tmux attach from a
+plain terminal and from inside local tmux. Unit tests cover target parsing for VM
+and host session forms.
 
 ### Slice 4: first simple read-only TUI
 
@@ -153,8 +160,8 @@ feasibility proof, and M3 is optional polish.
 
 ### M0a: CLI foundation (first usable release)
 
-**Deliverable:** Rust `list`, host status, VM lifecycle, and first read-only `tui` commands that work across the real hosts.
-Interactive development entry uses VM-owned tmux through `argos vm tmux`.
+**Deliverable:** Rust `list`, `sessions`, host status, VM lifecycle, and first read-only `tui` commands that work across the real hosts.
+Interactive entry goes through the sessions layer: unmanaged host tmux for host sessions and guest-owned tmux for VM sessions.
 
 1. Initialize the Cargo crate and a pinned Nix development shell for Rust/Cargo,
    rustfmt, Clippy and required CLI tools.
@@ -162,10 +169,10 @@ Interactive development entry uses VM-owned tmux through `argos vm tmux`.
    IDs, observed/cached state and the versioned JSON envelope described in architecture.md.
 3. Discover sessions concurrently with deadlines and structured per-host errors.
    No required remote installation beyond existing SSH and tmux in this milestone.
-4. Implement human-readable `list`, `list --json`, host status, and VM lifecycle
-   commands. Keep JSON stdout clean and test exit codes, partial failures and empty results.
-5. Enter development environments only through guest-owned tmux with `argos vm tmux`.
-   Preserve the user's existing host tmux bindings and avoid host-tmux attachment paths.
+4. Implement human-readable `list`, `list --json`, `sessions list`, host status,
+   and VM lifecycle commands. Keep JSON stdout clean and test exit codes, partial failures and empty results.
+5. Route all interactive terminal entry through `sessions attach`: host targets enter
+   unmanaged host tmux, and VM targets enter guest-owned tmux. Preserve the user's existing tmux bindings.
 
 M0a exit: complete the CLI portions on the real machines, including VM-owned
 persistent-process and terminal checks. CLI output must remain ready for another
@@ -180,8 +187,8 @@ program to consume.
 2. Invoke CLI read commands asynchronously with `--json`; render structured data and
    errors rather than scraping terminal tables. Keep filtering/selection in the TUI,
    but all host operations in the CLI. Handle schema mismatch and failed subprocesses.
-3. Future TUI entry should hand the terminal to `argos vm tmux` and restore/redraw
-   afterward. Test inside and outside tmux; guest tmux must not be treated as captured JSON output.
+3. Future TUI entry should hand the terminal to `argos sessions attach` and
+   restore/redraw afterward. Test inside and outside tmux; guest tmux must not be treated as captured JSON output.
 4. Add optional launch bindings only when they preserve the existing prefix, session
    picker, clipboard setup and navigation bindings.
 
@@ -192,11 +199,11 @@ Acceptance on the user's real machines:
   IDs/timestamps/schema version and ensure diagnostics cannot corrupt JSON. In M0b,
   the TUI displays those results, supports keyboard search/navigation/help and remains
   usable when resized. No duplicate host discovery implementation is introduced.
-- **A02:** Enter a disposable VM-owned tmux session on each relevant host. Record shell/process PID,
+- **A02:** Enter a disposable session on each relevant host, including host tmux and VM-owned tmux. Record shell/process PID,
   run a counter, switch away and reconnect. Same remote process remains alive and
   the counter advanced. Removing only the SSH client must not kill the session.
-- **A03:** Run VM tmux entry inside and outside host tmux. It connects to the
-  guest-owned tmux session, not host tmux. Prefix forwarding, resize and terminal
+- **A03:** Run `sessions attach` inside and outside host tmux. Host targets connect
+  to unmanaged host tmux; VM targets connect to guest-owned tmux. Prefix forwarding, resize and terminal
   cleanup work. Repeat through the TUI once TUI launch is added.
 - **A04:** Test an unreachable host, an authentication error, an untrusted host key,
   missing tmux and zero sessions. Each is distinct, and a bad host cannot freeze

@@ -36,8 +36,10 @@ implement a second SSH/VM control path. No local HTTP service is needed between 
 - The TUI launches the installed CLI via an explicit executable path and argument
   array, using the same config as the user. Never interpolate labels into shell code.
   Begin with bounded refresh/polling; a live event stream is not required for M0.
-- Interactive terminal entry is VM-owned tmux through `argos vm tmux`, not a JSON operation.
-  Do not capture and render a remote terminal session as if it were a JSON result.
+- Interactive terminal entry is the sessions layer, not a JSON operation.
+  `argos sessions attach host:<host>:<session>` enters unmanaged host tmux, while
+  `argos sessions attach vm:<id>` enters guest-owned tmux. Do not capture and
+  render a remote terminal session as if it were a JSON result.
 - Later mutations stay CLI-owned, including validation and destructive confirmation.
   A canceled TUI must not kill remote services or abandon a supervised host operation.
 
@@ -76,17 +78,23 @@ Use native command output formats, validate parsing, and keep remote command
 construction separate from display labels. Session names, paths, and branch names
 must not become unescaped shell code. No executable snippets in untrusted discovery data.
 
-## 3. VM tmux connection UX
+## 3. Sessions and VM tmux connection UX
 
 Do not embed tmux rendering in a homegrown terminal widget. Let the user's terminal
-and SSH PTY carry the interactive session. The normal interactive path is a tmux
-server running inside the project VM.
+and SSH PTY carry the interactive session. Argos separates environment lifecycle
+from attachable entry points:
 
-- `argos vm tmux ID` SSHes into the guest and joins `tmux new -A -s main`.
-- Host tmux may wrap the terminal, but it is not the project session owner.
-- The TUI should eventually show VM rows and dispatch to the same VM-owned tmux path.
+- VMs are managed isolated environments. `argos vm create/start/stop` owns their lifecycle.
+- Sessions are entry points. `argos sessions attach` owns terminal handoff.
+- `argos sessions attach vm:ID` and `argos vm tmux ID` SSH into the guest and join
+  `tmux new -A -s main`.
+- `argos sessions attach host:HOST:SESSION` enters unmanaged host tmux and must not
+  imply Argos owns that session's lifecycle.
+- Host tmux may wrap the terminal, but it is not the project session owner for VM work.
+- The TUI should eventually show host and VM session rows and dispatch through the
+  same sessions layer.
 - Keep an easy route back to the hub/picker and label VM sessions with their host/project.
-- Disconnecting or closing a VM tmux client must not kill sessions or restart shells.
+- Disconnecting or closing a tmux client must not kill sessions or restart shells.
 
 Preserve the user's existing tmux prefix, pane navigation and clipboard bindings.
 Remote tmux may be nested under local tmux, so prefix forwarding, returning to the

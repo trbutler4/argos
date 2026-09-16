@@ -5,22 +5,23 @@ Read README.md, docs/architecture.md and docs/plan.md before implementation.
 
 ## Current phase
 
-The Rust CLI implements local/SSH `list`, JSON output, strict private TOML
-inventory, host filtering, deadlines, a read-only `tui` session browser, and a
-read-only `host status` helper for installed host instances. `vm list` reads
-local VM state, `vm create` writes local state/workdir scaffolds and optional
-guest tmux config from `[vm.guest_tmux]`, `vm start`/`vm stop` run the local
-microVM process from that state, and `vm shell`/`vm tmux` SSH into the guest.
-The intended development entry point is VM-owned tmux with `argos vm tmux`; the
-legacy `attach` command has been removed to keep the workflow focused on
-isolated project VMs. `examples/config.toml` is active inventory schema, while
+The Rust CLI implements local/SSH host tmux discovery, `sessions attach` for
+attachable entry points, JSON output, strict private TOML inventory, host
+filtering, deadlines, a read-only `tui` session browser, and a read-only `host
+status` helper for installed host instances. VMs are isolated environments:
+`vm list` reads local VM state, `vm create` writes local state/workdir scaffolds
+and optional guest tmux config from `[vm.guest_tmux]`, `vm start`/`vm stop` run
+the local microVM process from that state, and `vm shell`/`vm tmux` SSH into the
+guest. Sessions are entry points: `sessions attach host:<host>:<session>` enters
+unmanaged host tmux, while `sessions attach vm:<id>` enters guest-owned tmux.
+`examples/config.toml` is active inventory schema, while
 `examples/environment-proposal.toml` is a future proposal. Do not mark
 implementation milestones complete from documentation checks.
 
 ## Keep the design focused
 
 - Reuse SSH, tmux, NixOS/systemd and devenv. Do not replace their core functions.
-- The normal interactive development path is a VM-owned tmux session per project.
+- VMs own isolated development environments; sessions are only attachable entry points into host or VM tmux.
 - Each task VM stays on its home machine and has a separate clone and persistent data.
 - No live migration, automatic synchronization, public ingress, multi-tenant control
   plane or general distribution-packaging effort.
@@ -50,7 +51,8 @@ implementation milestones complete from documentation checks.
   `cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`,
   `cargo build --locked`, `python3 tests/host_status.py`,
   `python3 tests/vm_list.py`, `python3 tests/local_tmux.py`,
-  `python3 tests/config_cli.py`, `python3 tests/remote_ssh.py`, and
+  `python3 tests/config_cli.py`, `python3 tests/remote_ssh.py`,
+  `python3 tests/attach_tmux.py`, `python3 tests/remote_attach.py`, and
   `python3 tests/tui.py`.
 
 ## Public repository boundary
