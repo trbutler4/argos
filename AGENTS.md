@@ -6,12 +6,13 @@ Read README.md, docs/architecture.md and docs/plan.md before implementation.
 ## Current phase
 
 The Rust CLI implements local/SSH `list`, JSON output, strict private TOML
-inventory, host filtering, deadlines, local/SSH `attach`, and a simple `tui`
-session browser with Enter-to-attach handoff. A first microvm.nix QEMU runner-package
-prototype builds and boots, but VM SSH, project setup and `env` commands are not
-implemented. `--local`/`--socket` bypass implicit inventory. `attach` supports
-exact local/SSH session targeting, safe same-server client switching, and remote
-connection windows from inside local tmux. `examples/config.toml` is active
+inventory, host filtering, deadlines, local/SSH `attach`, a simple `tui` session
+browser with Enter-to-attach handoff, and a read-only `host status` helper for
+installed host instances. A first microvm.nix QEMU runner-package prototype builds
+and boots, but VM SSH, project setup and `env` commands are not implemented.
+`--local`/`--socket` bypass implicit inventory. `attach` supports exact local/SSH
+session targeting, safe same-server client switching, and remote connection windows
+from inside local tmux. `examples/config.toml` is active
 inventory schema, while `examples/environment-proposal.toml` is a future proposal.
 Do not mark implementation milestones complete from documentation checks.
 
@@ -47,7 +48,8 @@ Do not mark implementation milestones complete from documentation checks.
   invalidate a VM backend or lifecycle assumption rather than hiding it behind an abstraction.
 - Commit focused changes. Enter `nix develop`, then run `cargo fmt --check`,
   `cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`,
-  `cargo build --locked`, `python3 tests/local_tmux.py`, and
+  `cargo build --locked`, `python3 tests/host_status.py`,
+  `python3 tests/local_tmux.py`, and
   `python3 tests/config_cli.py`, `python3 tests/remote_ssh.py`, and
   `python3 tests/attach_tmux.py`, `python3 tests/remote_attach.py`, and
   `python3 tests/tui.py`.

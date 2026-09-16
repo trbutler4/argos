@@ -11,9 +11,9 @@ Status: **multi-machine CLI discovery with a simple TUI browser**. Local and SSH
 use a private machine inventory, bounded concurrency and per-host deadlines.
 Local and SSH tmux attachment are available. The TUI provides session browsing,
 refresh, keyboard navigation, and Enter-to-attach terminal handoff. A first
-microvm.nix QEMU prototype builds and boots, but VM SSH, project setup and
-environment management commands are not implemented. No remote installation or
-provisioning is performed.
+microvm.nix QEMU prototype builds and boots, and `argos host status` reports
+installed-host VM readiness. VM SSH, project setup and environment management
+commands are not implemented. No remote installation or provisioning is performed.
 
 ## Try the CLI
 
@@ -89,6 +89,20 @@ nix develop --command cargo build --locked
 development independent of the installed config. Building this binary does not
 update your installed version or NixOS input pin.
 
+### Installed host helper
+
+VM-capable hosts should have Argos installed locally. The first host-installed
+contract is read-only:
+
+```sh
+argos host status
+argos host status --json
+```
+
+It reports the installed Argos version, host state/runtime directories, tool
+availability and whether `/dev/kvm` is accessible. This is the command the client
+will eventually run through SSH before asking a host to create or start VMs.
+
 ### MicroVM prototype
 
 A minimal microvm.nix/QEMU runner is available for backend exploration on
@@ -148,6 +162,7 @@ cargo fmt --check
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked
+python3 tests/host_status.py
 python3 tests/local_tmux.py
 python3 tests/config_cli.py
 python3 tests/remote_ssh.py

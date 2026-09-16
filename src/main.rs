@@ -8,6 +8,7 @@ use std::{
 
 mod attach;
 mod config;
+mod host;
 mod tmux;
 mod tui;
 
@@ -54,6 +55,20 @@ enum Command {
         host: Option<String>,
         #[arg(long, conflicts_with_all=["socket", "config", "host"])]
         local: bool,
+    },
+    /// Host-local helper commands for installed Argos instances.
+    Host {
+        #[command(subcommand)]
+        command: HostCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum HostCommand {
+    /// Report this host's Argos helper and VM capability status.
+    Status {
+        #[arg(long)]
+        json: bool,
     },
 }
 #[derive(Clone, Serialize)]
@@ -110,6 +125,9 @@ fn main() -> ExitCode {
             host,
             local,
         } => tui::run(socket, config, host, local),
+        Command::Host { command } => match command {
+            HostCommand::Status { json } => host::status(json),
+        },
     }
 }
 

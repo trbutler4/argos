@@ -135,6 +135,22 @@ prove SSH into the guest, guest host-key identity, forwarded ports, separate clo
 state, `devenv up`, reboot persistence, or browser access. Those belong to the
 next slice before any `env create/start/status/attach` command is added.
 
+### Slice 6: installed-host status helper
+
+Implemented interface: `argos host status [--json]`, intended to be run on each
+VM-capable host where Argos is installed. It is read-only and reports schema
+version, host name, Argos version, state/runtime roots, required tool availability
+and `/dev/kvm` accessibility. This creates the first stable SSH-invoked host
+helper contract without copying scripts to hosts or starting/stopping VMs yet.
+
+Verified: 20 Rust tests, fmt, Clippy and `tests/host_status.py` passed. On the
+current host, the helper reported `microvms: available` with `nix`, `tmux`, `ssh`
+and accessible KVM. Packaged validation is required before updating the NixOS pin.
+
+Boundaries: no lifecycle mutation, host registry, SSH-to-guest, or long-running
+supervised operation exists yet. The command only proves the installed binary can
+report whether the host is ready for those future steps.
+
 Release boundaries: **M0a (CLI) is the first usable release** without VM/browser
 features. **M0b adds the full-screen TUI over CLI JSON output.**
 **M2 is the initial complete managed-environment workflow**. M1 is its prerequisite
@@ -286,6 +302,8 @@ If another tooling layer is chosen, update this scope and its checks explicitly.
 Work:
 
 - Introduce a host-owned environment registry, stable IDs, locks and operation status.
+- Use installed Argos on VM-capable hosts as the initial SSH-invoked helper surface;
+  start with read-only `argos host status --json` before lifecycle mutations.
 - Wrap the demonstrated M1 lifecycle in `env create/start/stop/inspect`; no arbitrary
   root shell or broad sudo permissions. Use a small SSH-invoked helper only as needed.
 - Make long create operations supervised and reconnectable with operation IDs.
