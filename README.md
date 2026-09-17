@@ -237,6 +237,17 @@ Keys:
 - `Enter`: attach to the selected host session or VM session.
 - `q`: quit.
 
+## Releases
+
+`Cargo.toml` is the source of truth for the Argos version. The Nix package reads
+that version directly, so bumping `package.version` is the release version bump.
+
+Every push to `main` runs the release workflow. If tag `v<version>` does not
+exist, GitHub Actions validates the Rust project, builds the Nix package, creates
+an annotated tag, and publishes a GitHub release with an x86_64 Linux tarball and
+SHA-256 file. If the tag already exists, the workflow exits successfully without
+creating another release.
+
 ## Development checks
 
 ```sh

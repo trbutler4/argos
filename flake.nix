@@ -11,13 +11,14 @@
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       microvmSystem = "x86_64-linux";
+      cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
     in {
       packages = nixpkgs.lib.genAttrs systems (system:
         let pkgs = import nixpkgs { inherit system; };
         in rec {
           argos = pkgs.rustPlatform.buildRustPackage {
             pname = "argos";
-            version = "0.1.0";
+            version = cargoToml.package.version;
             src = pkgs.lib.cleanSource ./.;
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [ pkgs.makeWrapper ];
