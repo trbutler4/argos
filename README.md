@@ -1,163 +1,172 @@
 # Argos
 
-A command center for NixOS machines: **Rust CLI first, then a full-screen
-TUI consuming its structured output**.
+Argos is a personal command center for tmux sessions and isolated NixOS development VMs.
 
-**VMs are isolated environments. Sessions are entry points.** New tasks can get
-their own NixOS VM, separate Git clone, toolchain, backend processes, tmux
-session, and database state. Existing host tmux sessions remain useful as
-unmanaged entry points.
+It has two separate concepts:
 
-Status: **remote sessions plus local VM lifecycle**. Local and SSH tmux listing
-use a private machine inventory, bounded concurrency and per-host deadlines.
-`argos sessions attach` enters either an unmanaged host tmux session or a VM-owned
-tmux session (`vm:<id>`). `argos vm ...` creates, starts, stops and configures
-isolated environments. The TUI groups each host into sessions and VMs, and Enter
-attaches through the sessions layer. Local microVMs can be created, started,
-stopped, entered over SSH, and
-given a project workspace at `/workspace/repo` with `nix develop` support. No
-remote installation or provisioning is performed.
+- **Sessions** are attachable tmux entry points. They may be unmanaged tmux sessions on any configured host, or tmux running inside an Argos VM.
+- **VMs** are managed local microVM development environments. Argos creates, starts, stops, updates, and removes them. It does not manage project processes.
 
-## Try the CLI
+The normal project workflow is: create a VM from a repo, enter the VM-owned tmux session, then use the repo's own tools such as `nix develop`, `mise`, `just`, database scripts, or app runners.
+
+## Current scope
+
+Implemented:
+
+- Local and SSH discovery of existing tmux sessions.
+- Attach to host tmux sessions.
+- Create and manage local microVMs.
+- Attach to VM-owned tmux over SSH.
+- A basic TUI over the same session and VM model.
+- Repo profiles through `.argos.toml`.
+- Per-VM host port allocation for services running inside the guest.
+
+Not implemented yet:
+
+- Remote VM creation through the controller.
+- Tailscale HTTPS naming.
+- Project process management.
+- Cloud provisioning.
+
+## Install or run
+
+From the repo:
 
 ```sh
-cd argos
 nix develop
-cargo run --quiet --locked -- list
-cargo run --quiet --locked -- list --json
+cargo run --locked -- --help
+cargo run --locked -- list
+cargo run --locked -- tui --config ./config.local.toml
 ```
 
-`list` reads your machine inventory when present, otherwise it lists only the local
-default tmux server. `sessions list` is the explicit sessions namespace for the
-same host-tmux discovery. Use `--local` to explicitly stay local, or
-`--socket /absolute/path --json` for a specific local socket. These local modes
-bypass implicit inventory loading. Discovery does not create servers or change sessions.
-
-JSON schema version 1 includes `observed_at_unix_ms` and a deterministic list of hosts with
-`id` (hostname), `status`, `sessions`, and `error`. Sessions have `id`, exact `name`,
-`windows`, and `attached_clients`. Session IDs are scoped to a server lifetime,
-not globally persistent task IDs. Human output escapes special characters.
-Exit codes: 0 for success (including no server/sessions), 1 for operational errors,
-and 2 for invalid arguments. Operational tmux failures include a structured JSON
-error, with diagnostics on stderr.
-
-### Open the TUI
+Build the packaged binary:
 
 ```sh
-argos tui --config /path/inventory.toml
-argos tui --config ./config.local.toml
+nix build
+./result/bin/argos --help
 ```
 
-The TUI stays simple. It shows each discovered host with separate `sessions` and
-`vms` groups, supports `j`/`k` or arrow navigation, `r` to refresh, `q` to quit,
-and Enter to attach. Host tmux rows attach as host sessions; VM rows attach as
-`vm:<id>` sessions through the same sessions layer.
-
-For development, build and run directly without a NixOS rebuild:
+Run from GitHub without installing:
 
 ```sh
-nix develop --command cargo build --locked
-./target/debug/argos sessions list --config ./config.local.toml
-./target/debug/argos sessions attach host:desktop:qvattro --config ./config.local.toml
-./target/debug/argos sessions attach vm:my-project --state-dir /absolute/test/state
-./target/debug/argos tui --config ./config.local.toml
+nix run github:trbutler4/argos -- list
 ```
 
-`config.local.toml` is gitignored and directly editable. `--config` always means
-"Argos config", not "host-only config". You may pass it to any command that
-accepts it; each command reads the sections it needs and may ignore the rest.
-Building this binary does not update your installed version or NixOS input pin.
+As a Nix flake input:
 
-### Sessions and environments
+```nix
+inputs.argos.url = "github:trbutler4/argos";
+inputs.argos.inputs.nixpkgs.follows = "nixpkgs";
+```
 
-Argos keeps two concepts separate in the CLI and code:
+Then install the package for a host or Home Manager user:
 
-- **VMs** are managed isolated environments. Use `argos vm create/start/stop` to
-  control lifecycle and configuration.
-- **Sessions** are attachable entry points. Use `argos sessions attach` to enter
-  either unmanaged host tmux or guest tmux inside a VM.
+```nix
+inputs.argos.packages.${pkgs.stdenv.hostPlatform.system}.default
+```
 
-Examples:
+## Config
+
+The Argos config is a TOML machine inventory. The default path is `~/.config/argos/config.toml`. A local development config such as `config.local.toml` is also fine.
+
+```toml
+schema_version = 1
+
+[client]
+machine_id = "workstation"
+connect_timeout_seconds = 3
+max_parallel_probes = 4
+
+[machines.workstation]
+# local machine, default tmux socket
+
+[machines.desktop]
+ssh_alias = "desktop"
+# socket = "/absolute/path/to/tmux.sock"
+
+[vm.guest_tmux]
+config_path = "/absolute/path/to/tmux.conf"
+# or:
+# config_text = """
+# set -g mouse on
+# """
+```
+
+`--config` always means Argos config. Commands only read the sections they need.
+
+SSH hosts must already work noninteractively, for example:
+
+```sh
+ssh -T -o BatchMode=yes desktop true
+```
+
+## Sessions
+
+List sessions:
 
 ```sh
 argos sessions list --config ./config.local.toml
-argos sessions attach host:desktop:qvattro --config ./config.local.toml
-argos sessions attach qvattro --config ./config.local.toml --host desktop
-argos sessions attach vm:trade-feature
+argos list --config ./config.local.toml
+argos list --local
 ```
 
-Host sessions are unmanaged: Argos can list and attach, but it does not own their
-lifecycle. VM sessions are backed by the VM record and enter guest-owned tmux over
-SSH, equivalent to `argos vm tmux ID`. Passing `--config` to a VM session attach is
-valid even when that attach only needs VM state today.
-
-### Installed host helper
-
-VM-capable hosts should have Argos installed locally. The first host-installed
-contract is read-only:
+Attach to a host tmux session:
 
 ```sh
-argos host status
-argos host status --json
-argos hosts status --config ./config.local.toml
-argos hosts status --config ./config.local.toml --json
+argos sessions attach host:desktop:qvattro --config ./config.local.toml
+argos sessions attach qvattro --host desktop --config ./config.local.toml
 ```
 
-`argos host status` reports the installed Argos version, host state/runtime directories, tool
-availability and whether `/dev/kvm` is accessible. `argos hosts status` runs that helper locally
-or through configured SSH aliases so the controller can check VM hosts before asking them to create or start VMs.
+Attach to a VM-owned tmux session:
 
-### VM state scaffold
+```sh
+argos sessions attach vm:trade-feature
+argos vm tmux trade-feature
+```
 
-The first VM lifecycle commands are conservative and host-local. `create` writes
-state, creates a per-VM work directory, optionally clones a separate repo, and
-renders a microVM config plus instance flake. A repo may include `.argos.toml`,
-or `create` may receive `--profile PATH`, to declare guest packages and guest
-ports. Argos installs those packages and allocates unique host loopback ports per
-VM instance, but it does not manage project processes. `start` builds the local
-microVM runner, launches it in a dedicated tmux console session, waits for
-`ARGOS_VM_READY`, and records the PID/log/session paths. `create` and `start`
-can read `[vm.guest_tmux]` from the selected Argos config and install either
-inline `config_text` or `config_path` contents as `/etc/tmux.conf` inside the
-guest. The VM mounts the per-VM work directory at `/workspace`, so a cloned
-repo is available at `/workspace/repo` by default. If `--repo` points at a local
-checkout with an `origin`, Argos clones from that origin so the VM checkout can
-pull and push like a normal repo. The generated VM mounts the VM host's `~/.ssh`
-and copies its git config, so git uses that host's existing credentials.
-`shell` and `tmux` start there by default. Guests include flakes, a writable Nix
-store overlay, and enough default memory for small `nix develop` workflows. `show` reports one VM record,
-including package intent and `http://127.0.0.1:<host-port>` links. `up` is the
-normal repo workflow: it creates the VM if missing, starts it if needed, then
-hands off to the VM-owned tmux session. `stop` terminates the recorded local
-process and keeps persistent instance data.
-`logs` prints or follows the VM serial console log for boot and guest-kernel
-debugging.
+Host sessions are unmanaged. Argos lists and attaches to them, but does not own their lifecycle.
+
+## VMs
+
+Create or enter a VM for a repo:
+
+```sh
+cd ~/Projects/my-repo
+argos vm up "my task" --repo .
+```
+
+Useful VM commands:
 
 ```sh
 argos vm list
-argos vm list --json
-argos vm create "Trade Feature" --repo /path/or/git-url --project trade --config ./config.local.toml --profile ./.argos.toml
-argos vm create "Trade Feature" --repo /path/or/git-url --dry-run --json
-argos vm up "Trade Feature" --repo . --config ./config.local.toml
-argos vm up "Trade Feature" --repo . --no-attach
-argos vm show trade-feature
-argos vm show trade-feature --json
-argos vm update trade-feature
-argos vm update trade-feature --profile ./.argos.toml
-argos vm update trade-feature --dry-run
-argos vm start trade-feature --config ./config.local.toml
-argos vm logs trade-feature
-argos vm logs trade-feature --follow
-argos vm rm trade-feature --dry-run
-argos vm rm trade-feature --force
-argos vm shell trade-feature
-argos vm tmux trade-feature
-argos sessions attach vm:trade-feature
-argos vm stop trade-feature
-argos vm list --state-dir /absolute/test/state --json
+argos vm show my-task
+argos vm logs my-task --follow
+argos vm shell my-task
+argos vm tmux my-task
+argos vm stop my-task
+argos vm rm my-task --dry-run
+argos vm rm my-task --force
 ```
 
-Repo profile example:
+`vm up` creates the VM if missing, starts it if needed, then attaches to guest tmux. Use `--no-attach` to only create/start.
+
+VM state is host-local. By default Argos uses:
+
+- `~/.local/state/argos/vms/*.json` for VM records.
+- `~/.local/state/argos/instances/<id>/` for generated microVM files and logs.
+- `~/.local/state/argos/workdirs/<id>/repo` for cloned repos.
+
+`--state-dir /absolute/path` can isolate test state.
+
+### Repos and git credentials
+
+If `--repo` is a local checkout with an `origin`, Argos clones from that origin into VM-owned storage. The guest repo therefore has a normal remote and can `git fetch`, `git pull`, and `git push`.
+
+Generated VMs mount the VM host's `~/.ssh` at `/root/.ssh` and copy the VM host's git config into `/etc/gitconfig`, so guest git uses the host's existing credentials and identity.
+
+### Repo profile
+
+A repo may include `.argos.toml`:
 
 ```toml
 [workspace]
@@ -175,268 +184,79 @@ name = "web"
 guest = 5173
 ```
 
-Two VMs for the same repo can both use guest port `3001`. Argos persists a
-distinct host port for each VM, for example `api: http://127.0.0.1:43000 ->
-guest:3001` and `api: http://127.0.0.1:43002 -> guest:3001`.
+Argos installs the listed Nixpkgs package attributes in the guest. It maps each declared guest port to a unique host loopback port, so two VMs can both run an app on guest port `3001`.
 
-State records live under `$ARGOS_STATE_DIR/vms/*.json`, otherwise
-`$XDG_STATE_HOME/argos/vms/*.json` or `~/.local/state/argos/vms/*.json`.
-Generated instance scaffolds live under `instances/`, and default work clones
-under `workdirs/`. VM start/shell/tmux/stop is local-only for now.
-Remote placement, Tailscale HTTPS names and project process management come
-later.
+Argos does not run servers. Start those inside the VM using the repo's own tools.
 
-Optional config:
+### Updating an existing VM profile
 
-```toml
-[vm.guest_tmux]
-config_path = "/absolute/path/to/tmux.conf"
-# or:
-# config_text = """
-# set -g mouse on
-# """
-```
-
-### MicroVM prototype
-
-A minimal microvm.nix/QEMU runner is available for backend exploration on
-`x86_64-linux`:
+After changing `.argos.toml`:
 
 ```sh
-nix build .#argos-microvm-prototype
-mkdir -p .run/microvm-prototype
-cd .run/microvm-prototype
-../../result/bin/microvm-run
+argos vm update my-task --dry-run
+argos vm update my-task
 ```
 
-The runner creates its writable `var.img` and control socket in the current
-directory. It is intentionally console-only for now: no SSH keys, forwarded ports,
-project clone or devenv process manager are configured yet. See
-`docs/microvm-prototype.md` for the verified boot result and next slice.
+Profile resolution order:
 
-### Nix package and installation
+1. Explicit `--profile PATH`.
+2. The cloned repo's `.argos.toml`.
+3. The previous profile path if it still exists.
+4. Defaults.
+
+If the VM is already running, stop and start it to apply changes to the generated microVM config.
+
+## Host helpers
+
+On a VM-capable host:
 
 ```sh
-nix build                       # result/bin/argos
-nix run . -- list                # no dev shell needed
+argos host status
+argos host status --json
 ```
 
-The release package provides tmux and OpenSSH as PATH fallbacks while preserving
-user-provided wrappers first. Rust/Cargo are only build and development
-dependencies. To use the published package without installation:
+From a controller with config:
 
 ```sh
-nix run github:trbutler4/argos -- list
+argos hosts status --config ./config.local.toml
+argos hosts status --config ./config.local.toml --json
 ```
 
-To install declaratively, add the flake input to your NixOS flake:
+The status helper reports Argos version, state paths, required tools, and `/dev/kvm` access.
 
-```nix
-inputs.argos.url = "github:trbutler4/argos";
-inputs.argos.inputs.nixpkgs.follows = "nixpkgs";
-```
-
-Pass `inputs` through `home-manager.extraSpecialArgs`, then add this to the desired
-Home Manager user's module (which accepts `{ inputs, pkgs, ... }`):
-
-```nix
-home.packages = [ inputs.argos.packages.${pkgs.stdenv.hostPlatform.system}.default ];
-```
-
-Rebuild your NixOS configuration to activate it. Later updates are explicit:
-`nix flake update argos`, followed by your normal system rebuild. During local
-development use `cargo run` or `nix run .` before publishing and updating the pin.
-
-### Development checks
-
-Inside `nix develop`:
+## TUI
 
 ```sh
-cargo fmt --check
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-cargo build --locked
-python3 tests/host_status.py
-python3 tests/vm_list.py
-python3 tests/local_tmux.py
-python3 tests/config_cli.py
-python3 tests/remote_ssh.py
-python3 tests/attach_tmux.py
-python3 tests/remote_attach.py
-python3 tests/tui.py
+argos tui --config ./config.local.toml
 ```
 
-The integration tests use disposable real tmux servers on unique sockets and only
-clean up those servers. Session attach tests use real PTYs and disposable local or
-loopback-SSH tmux servers. They never kill or modify your existing sessions.
-The SSH test uses a real rootless loopback sshd and real tmux with disposable keys
-and trust files. A temporary PATH adapter supplies the test SSH configuration to
-the real SSH executable. It does not fake responses or modify user SSH settings.
-Run that test with the unwrapped debug binary, not the Nix-wrapped executable.
-The dev shell and Rust dependencies are pinned in `flake.lock` and `Cargo.lock`.
+Keys:
 
-## Private machine inventory
+- `j`, `k`, arrows: move.
+- `r`: refresh.
+- `Enter`: attach to the selected host session or VM session.
+- `q`: quit.
 
-Copy `examples/config.toml` to `$XDG_CONFIG_HOME/argos/config.toml` (default
-`~/.config/argos/config.toml`) and customize it. Keep this file outside the public
-repository. All names in the example are fictional.
-
-```toml
-schema_version = 1
-
-[client]
-machine_id = "workstation"
-connect_timeout_seconds = 3
-max_parallel_probes = 4
-
-[machines.workstation]
-
-[machines.server]
-ssh_alias = "server"
-```
-
-The client ID must name a machine in the inventory. That entry is queried locally.
-Other entries require an existing SSH alias or hostname, optionally `user@host`.
-Each entry can set `socket = "/path/to/tmux.sock"` on its own machine. The timeout
-is a total per-host discovery deadline, not just a connection timeout. Parallelism
-is limited by `max_parallel_probes`. Unknown fields and unsupported schema versions
-are rejected rather than silently ignored. The future VM/project schema is separately
-proposed in `examples/environment-proposal.toml` and is not accepted by this loader.
+## Development checks
 
 ```sh
-argos list                             # all configured hosts
-argos list --json                       # successes plus structured per-host errors
-argos list --host server                # one configured host
-argos list --config /path/inventory.toml
-argos list --local                      # no remote connections
+nix develop --command bash -lc '
+  cargo fmt -- --check &&
+  cargo clippy --locked -- -D warnings &&
+  cargo test --locked -- --nocapture &&
+  cargo build --locked &&
+  python3 tests/local_tmux.py &&
+  python3 tests/config_cli.py &&
+  python3 tests/host_status.py &&
+  python3 tests/vm_list.py &&
+  python3 tests/remote_ssh.py &&
+  python3 tests/remote_attach.py &&
+  python3 tests/tui.py
+'
 ```
 
-`--host` requires an inventory. `--socket` is local-only and cannot be combined
-with `--config` or `--host`. Missing default inventory falls back to local listing,
-but a missing explicitly selected file is an error. Configuration errors exit 2.
-A failed host does not hide healthy hosts: JSON retains every requested host and
-exits 1 if any failed. Successful empty results exit 0.
+Package check:
 
-SSH uses existing user SSH configuration and keys, requires known host keys, and
-never prompts for passwords or accepts unknown keys. Forwarding is disabled for
-probes. Run your usual `ssh <alias>` separately to establish trust/authentication
-when needed. An unavailable agent, rejected key, offline host or missing remote
-tmux is reported explicitly. No credentials belong in this inventory.
-
-## The workflow
-
-- All hosts run NixOS and already communicate over Tailscale.
-- SSH provides terminal access, tunnels, and explicit file transfers over the tailnet.
-- Existing tmux sessions remain usable without migration or VM adoption.
-- Each managed task stays on its original machine. No live migration or file sync.
-- Each task VM has a separate clone, not a Git worktree pointing at host metadata.
-- Use devenv inside the clone for project tooling and process management.
-- Keep the browser, terminal UI, and optional Hyprland integration on the client.
-- This is a tool for one person's workflow, not a multi-tenant platform or a product
-  that needs cross-platform installers and a plugin marketplace.
-
-## What the interface should feel like
-
-```text
-argos
-  workstation                                     online
-    config            host tmux     listed
-    app-feature       VM running    stack ready       [app]
-    app-fix           VM running    stack starting
-  server                                          online
-    experiments       host tmux     listed
-  laptop                                          unreachable · last seen 12m ago
-    docs              host tmux     last observed running
+```sh
+nix build .# --print-build-logs
 ```
-
-All host and project names in examples are fictional. Do not infer LLM activity
-from a process merely being alive. Offline hosts have unknown current state,
-not a fabricated stopped state.
-
-Actions: search, attach to a session, open service, inspect logs/status, and, for
-**managed task VMs only**, create/start/stop. Deleting an environment is a
-separate confirmed action.
-
-An environment is not a machine and a session is not an environment:
-
-```text
-machine: stable NixOS host, reachable through its existing SSH alias
-  environment: optional managed VM + clone + persistent data + service definitions
-    session: persistent tmux shell, agent, or interactive tool
-```
-
-Existing host tmux sessions can be listed and attached without registering a project.
-
-## Proposed command surface
-
-The executable is named `argos`.
-
-```text
-argos                              # CLI help initially
-argos tui                          # full-screen TUI, added after the CLI
-argos list                         # human-readable hosts and sessions
-argos list --json                  # structured snapshot for the TUI/scripts
-argos vm create <name> --repo <repo>
-argos vm start <id>
-argos sessions attach <target>      # enter host:<host>:<session> or vm:<id>
-argos vm tmux <id>                  # direct alias for VM-owned tmux
-argos vm stop <id>
-argos open <machine/environment> [service]
-argos env inspect <machine/environment>
-argos env destroy <machine/environment>  # explicit destructive confirmation
-```
-
-Local/SSH `list`, JSON output, filtering, `sessions attach` for host and VM
-sessions, the first TUI browser with session/VM attach handoff, local VM lifecycle
-and VM-owned tmux entry are implemented today. Other commands
-are proposed, not installed commands. `start` boots a stopped VM.
-It does **not** restore process memory. Detach/switch to keep agents and backends
-running; stopping a VM ends its processes while retaining its disk.
-
-## Build order
-
-1. **Connect to existing work, CLI first.** M0a delivers Rust commands for listing
-tmux sessions on two real hosts, with human and JSON output. M0b adds the
-full-screen TUI as a consumer of those commands. Disconnecting the client never
-kills a VM-owned session.
-2. **Prove the isolated task environment.** Run two real project stacks in two
-   separate-clone VMs on one host, using the same internal ports and independent
-   database data. Validate tooling persistence across a reboot.
-3. **Join the two workflows.** Create and operate managed environments from the same
-   interface, enter VM-owned tmux through the host, and open each app through a
-   local tunnel.
-4. **Polish for daily use.** Better status/log views, optional Hyprland launch action,
-   stable service origins, and lightweight LLM status hooks where actually supported.
-
-Do not build a generic orchestration framework before the first two milestones work.
-
-**First usable release: local VM lifecycle plus VM-owned tmux entry.** The TUI layers on
-top as a browser and launcher. **Initial full task-environment workflow: M2**, after the M1 VM
-proof. M3 is optional polish, not part of either completion boundary.
-
-## Design choices and open decisions
-
-- **Confirmed workflow:** NixOS hosts over Tailscale, existing tmux sessions,
-  stationary task VMs, separate clones, Rust CLI-first delivery followed by a TUI,
-  and no distribution-packaging priority.
-- **Proposed design:** SSH transport, devenv project definitions,
-  and host-authoritative state.
-- **VM candidate:** microvm.nix, starting with a QEMU/KVM prototype. Persistent
-  writable Nix state, networking, and service ownership are feasibility gates.
-- **Implementation language:** Rust, chosen to build familiarity with the language
-  for hands-on practice. This is a learning preference, not a
-  claim that Rust will outperform Go on an I/O-bound SSH/VM workflow. Use native
-  SSH/tmux commands and keep the TUI separate from discovery and lifecycle operations.
-- **TUI framework:** choose a Rust framework for M0b, not a custom terminal renderer.
-- **Not confirmed:** first project for the VM proof. `example-app` is a candidate, not an
-  agreed requirement. Start with two modest VMs and measure resources on the target host.
-
-## Documents
-
-- [Architecture and workflow decisions](docs/architecture.md)
-- [Milestones, acceptance checks, and first implementation tasks](docs/plan.md)
-- [Example proposed inventory](examples/config.toml)
-
-The user's NixOS config repo should eventually import this project's small host and
-Home Manager modules. This repository owns the tool; it does not replace that repo
-or modify host settings merely by opening the dashboard.
