@@ -148,18 +148,57 @@ guest = 5173
         assert [port["name"] for port in value["record"]["ports"]] == ["api", "web"]
         assert [port["guest"] for port in value["record"]["ports"]] == [3001, 5173]
         assert len({port["host"] for port in value["record"]["ports"]}) == 2
+        api_host = next(port["host"] for port in value["record"]["ports"] if port["name"] == "api")
         assert value["record"]["ssh_host"] == "127.0.0.1"
         assert value["record"]["ssh_user"] == "root"
         assert isinstance(value["record"]["ssh_port"], int)
         assert (Path(value["microvm_config"]).parent / "flake.nix").is_file()
         assert (work_root / "trade-feature" / "repo" / ".git").is_dir()
+        dry_existing_update = run(str(BINARY), "vm", "update", "trade-feature", "--state-dir", str(create_state), "--dry-run", "--json")
+        assert dry_existing_update.returncode == 0, dry_existing_update.stderr
+        assert json.loads(dry_existing_update.stdout)["profile_source"] == str(profile)
+        repo_profile = work_root / "trade-feature" / "repo" / ".argos.toml"
+        repo_profile.write_text('''[workspace]
+workdir = "/workspace/repo"
+
+[vm]
+packages = ["jq"]
+
+[[ports]]
+name = "api"
+guest = 3001
+
+[[ports]]
+name = "admin"
+guest = 9090
+''')
+        dry_update = run(str(BINARY), "vm", "update", "trade-feature", "--state-dir", str(create_state), "--dry-run", "--json")
+        assert dry_update.returncode == 0, dry_update.stderr
+        dry_update_value = json.loads(dry_update.stdout)
+        assert dry_update_value["dry_run"] is True
+        assert dry_update_value["profile_source"] == str(repo_profile)
+        assert dry_update_value["record"]["packages"] == ["jq"]
+        assert json.loads((create_state / "vms" / "trade-feature.json").read_text())["packages"] == ["go", "just"]
+        updated = run(str(BINARY), "vm", "update", "trade-feature", "--state-dir", str(create_state), "--json")
+        assert updated.returncode == 0, updated.stderr
+        updated_value = json.loads(updated.stdout)
+        assert updated_value["dry_run"] is False
+        assert updated_value["profile_source"] == str(repo_profile)
+        assert updated_value["record"]["profile_path"] == str(repo_profile)
+        assert updated_value["record"]["packages"] == ["jq"]
+        assert [port["name"] for port in updated_value["record"]["ports"]] == ["api", "admin"]
+        assert next(port["host"] for port in updated_value["record"]["ports"] if port["name"] == "api") == api_host
+        assert next(port["host"] for port in updated_value["record"]["ports"] if port["name"] == "admin") != api_host
+        microvm_text = Path(value["microvm_config"]).read_text()
+        assert 'environment.systemPackages = with pkgs; [ git tmux openssh jq ];' in microvm_text
+        assert 'guest.port = 9090;' in microvm_text and 'guest.port = 5173;' not in microvm_text
         listed = json.loads(run(str(BINARY), "vm", "list", "--state-dir", str(create_state), "--json").stdout)
         assert [vm["id"] for vm in listed["vms"]] == ["trade-feature"]
-        assert listed["vms"][0]["status"] == "created"
+        assert listed["vms"][0]["status"] == "created" and listed["vms"][0]["packages"] == ["jq"]
         show_json = run(str(BINARY), "vm", "show", "trade-feature", "--state-dir", str(create_state), "--json")
         assert show_json.returncode == 0, show_json.stderr
         shown = json.loads(show_json.stdout)
-        assert shown["record"]["ports"] == value["record"]["ports"]
+        assert shown["record"]["ports"] == updated_value["record"]["ports"]
         show_human = run(str(BINARY), "vm", "show", "trade-feature", "--state-dir", str(create_state))
         assert show_human.returncode == 0, show_human.stderr
         assert "links:" in show_human.stdout and "api: http://127.0.0.1:" in show_human.stdout
@@ -167,7 +206,7 @@ guest = 5173
         assert second.returncode == 0, second.stderr
         second_value = json.loads(second.stdout)
         assert {p["guest"] for p in second_value["record"]["ports"]} == {3001, 5173}
-        assert {p["host"] for p in second_value["record"]["ports"]}.isdisjoint({p["host"] for p in value["record"]["ports"]})
+        assert {p["host"] for p in second_value["record"]["ports"]}.isdisjoint({p["host"] for p in updated_value["record"]["ports"]})
         duplicate = run(str(BINARY), "vm", "create", "Trade Feature", "--state-dir", str(create_state), "--json")
         assert duplicate.returncode == 1 and "already exists" in duplicate.stderr
         bad_args = run(str(BINARY), "vm", "create", "bad", "--id", "bad/slash", "--state-dir", str(create_state), "--json")
@@ -278,7 +317,7 @@ out.symlink_to(runner)
         (vms / "bad.json").write_text(json.dumps(record("bad/slash")))
         bad = run(str(BINARY), "vm", "list", "--state-dir", str(state), "--json")
         assert bad.returncode == 1 and "invalid_state" in bad.stderr
-    print("PASS: VM create/start/logs/shell/tmux/stop/rm/list manages deterministic local state, guest SSH metadata, guest tmux config injection, tmux process lifecycle, clone/config scaffolds, malformed state, fake local runner lifecycle, and no remote hosts.")
+    print("PASS: VM create/update/start/logs/shell/tmux/stop/rm/list manages deterministic local state, guest SSH metadata, guest tmux config injection, tmux process lifecycle, clone/config scaffolds, malformed state, fake local runner lifecycle, and no remote hosts.")
 
 
 if __name__ == "__main__":

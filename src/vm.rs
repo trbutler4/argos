@@ -1,7 +1,7 @@
 use crate::{config, host};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::IsTerminal,
     io::Read,
@@ -150,6 +150,18 @@ struct VmShowOutput {
 }
 
 #[derive(Debug, Serialize)]
+struct VmUpdateOutput {
+    schema_version: u32,
+    state_root: String,
+    state_file: String,
+    profile_source: String,
+    dry_run: bool,
+    restart_required: bool,
+    previous_record: VmRecord,
+    record: VmRecord,
+}
+
+#[derive(Debug, Serialize)]
 struct VmStartOutput {
     schema_version: u32,
     state_root: String,
@@ -216,6 +228,15 @@ pub(crate) struct CreateOptions {
 pub(crate) struct ShowOptions {
     pub(crate) id: String,
     pub(crate) state_dir: Option<PathBuf>,
+    pub(crate) json: bool,
+}
+
+pub(crate) struct UpdateOptions {
+    pub(crate) id: String,
+    pub(crate) state_dir: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
+    pub(crate) profile: Option<PathBuf>,
+    pub(crate) dry_run: bool,
     pub(crate) json: bool,
 }
 
@@ -338,6 +359,24 @@ pub(crate) fn show(options: ShowOptions) -> ExitCode {
         println!("{}", serde_json::to_string(&output).unwrap());
     } else {
         print_show(&output);
+    }
+    ExitCode::SUCCESS
+}
+
+pub(crate) fn update(options: UpdateOptions) -> ExitCode {
+    let json = options.json;
+    let output = match update_vm(options) {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("error: {}: {}", error.code, error.message);
+            let code = if error.code == "invalid_args" { 2 } else { 1 };
+            return ExitCode::from(code);
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string(&output).unwrap());
+    } else {
+        print_update(&output);
     }
     ExitCode::SUCCESS
 }
@@ -553,6 +592,93 @@ fn show_vm(options: ShowOptions) -> Result<VmShowOutput, VmError> {
         state_file: state_file.display().to_string(),
         record,
         json: options.json,
+    })
+}
+
+fn update_vm(options: UpdateOptions) -> Result<VmUpdateOutput, VmError> {
+    if !valid_id(&options.id) {
+        return Err(invalid_args(
+            "VM id must be 1-64 chars of letters, digits, '_' or '-'",
+        ));
+    }
+    let tmux_config = load_guest_tmux_config(options.config.as_deref())?;
+    let state_root = state_root(options.state_dir)?;
+    let state_file = state_root.join("vms").join(format!("{}.json", options.id));
+    let mut record = load_record(&state_file)?;
+    let previous_record = record.clone();
+    let loaded_profile = load_update_profile(
+        options.profile.as_deref(),
+        record.repo_path.as_deref(),
+        record.profile_path.as_deref(),
+    )?;
+    let profile_source = loaded_profile
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "default".into());
+    record.profile_path = loaded_profile
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    record.guest_workdir = Some(loaded_profile.profile.workspace.workdir.clone());
+    record.packages = loaded_profile.profile.vm.packages.clone();
+    record.ports =
+        allocate_update_port_mappings(&loaded_profile.profile, &state_root, &previous_record)?;
+    record.updated_at_unix_ms = Some(now_ms());
+    validate_record(&record, &state_file)?;
+
+    let restart_required = record.status == "running" && record != previous_record;
+    if !options.dry_run {
+        let instance_dir = record
+            .instance_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| state_root.join("instances").join(&record.id));
+        fs::create_dir_all(&instance_dir).map_err(|error| {
+            state_error(format!(
+                "cannot create VM instance directory {}: {error}",
+                instance_dir.display()
+            ))
+        })?;
+        let microvm_config = record
+            .microvm_config
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| instance_dir.join("microvm.nix"));
+        let flake_path = record
+            .flake_path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| instance_dir.join("flake.nix"));
+        write_guest_tmux_config(&instance_dir, tmux_config.as_deref())?;
+        fs::write(
+            &microvm_config,
+            render_microvm_config(&record, tmux_config.as_deref()),
+        )
+        .map_err(|error| {
+            state_error(format!(
+                "cannot write microVM config {}: {error}",
+                microvm_config.display()
+            ))
+        })?;
+        fs::write(&flake_path, render_instance_flake()).map_err(|error| {
+            state_error(format!(
+                "cannot write microVM flake {}: {error}",
+                flake_path.display()
+            ))
+        })?;
+        write_record(&state_file, &record)?;
+    }
+
+    Ok(VmUpdateOutput {
+        schema_version: 1,
+        state_root: state_root.display().to_string(),
+        state_file: state_file.display().to_string(),
+        profile_source,
+        dry_run: options.dry_run,
+        restart_required,
+        previous_record,
+        record,
     })
 }
 
@@ -1075,6 +1201,46 @@ fn load_repo_profile(
     })
 }
 
+fn load_update_profile(
+    explicit: Option<&Path>,
+    repo_path: Option<&str>,
+    previous_profile: Option<&str>,
+) -> Result<LoadedProfile, VmError> {
+    if let Some(path) = explicit {
+        let path = normalize_profile_path(path)?;
+        let profile = read_repo_profile(&path)?;
+        return Ok(LoadedProfile {
+            profile,
+            path: Some(path),
+        });
+    }
+    if let Some(repo_path) = repo_path {
+        let path = Path::new(repo_path).join(".argos.toml");
+        if path.is_file() {
+            let path = normalize_profile_path(&path)?;
+            let profile = read_repo_profile(&path)?;
+            return Ok(LoadedProfile {
+                profile,
+                path: Some(path),
+            });
+        }
+    }
+    if let Some(path) = previous_profile {
+        let path = normalize_profile_path(Path::new(path))?;
+        if path.is_file() {
+            let profile = read_repo_profile(&path)?;
+            return Ok(LoadedProfile {
+                profile,
+                path: Some(path),
+            });
+        }
+    }
+    Ok(LoadedProfile {
+        profile: RepoProfile::default(),
+        path: None,
+    })
+}
+
 fn normalize_profile_path(path: &Path) -> Result<PathBuf, VmError> {
     if path.as_os_str().is_empty() {
         return Err(invalid_args("--profile cannot be empty"));
@@ -1188,9 +1354,57 @@ fn allocate_port_mappings(
     Ok(mappings)
 }
 
+fn allocate_update_port_mappings(
+    profile: &RepoProfile,
+    state_root: &Path,
+    current: &VmRecord,
+) -> Result<Vec<VmPortMapping>, VmError> {
+    let mut used = used_host_ports_excluding(state_root, &current.id)?;
+    let mut preserved = BTreeMap::new();
+    for mapping in &current.ports {
+        preserved.insert((mapping.name.clone(), mapping.guest), mapping.host);
+    }
+    let mut mappings = Vec::new();
+    for port in &profile.ports {
+        let key = (port.name.clone(), port.guest);
+        let host = if let Some(host) = preserved.get(&key).copied()
+            && !used.contains(&host)
+        {
+            used.insert(host);
+            host
+        } else {
+            let Some(host) =
+                (APP_PORT_START..=APP_PORT_END).find(|candidate| used.insert(*candidate))
+            else {
+                return Err(VmError {
+                    code: "state_error",
+                    message: format!("no free host ports in range {APP_PORT_START}-{APP_PORT_END}"),
+                });
+            };
+            host
+        };
+        mappings.push(VmPortMapping {
+            name: port.name.clone(),
+            guest: port.guest,
+            host,
+        });
+    }
+    Ok(mappings)
+}
+
 fn used_host_ports(state_root: &Path) -> Result<BTreeSet<u16>, VmError> {
+    used_host_ports_excluding(state_root, "")
+}
+
+fn used_host_ports_excluding(
+    state_root: &Path,
+    excluded_id: &str,
+) -> Result<BTreeSet<u16>, VmError> {
     let mut used = BTreeSet::new();
     for record in load_vms(&state_root.join("vms"))? {
+        if record.id == excluded_id {
+            continue;
+        }
         if let Some(port) = record.ssh_port {
             used.insert(port);
         }
@@ -1884,6 +2098,31 @@ fn print_show(output: &VmShowOutput) {
         println!("  ssh: {user}@{host}:{port}");
     }
     print_record_profile(vm, "  ");
+}
+
+fn print_update(output: &VmUpdateOutput) {
+    println!(
+        "{} {}",
+        if output.dry_run {
+            "would update"
+        } else {
+            "updated"
+        },
+        serde_json::to_string(&output.record.name).unwrap()
+    );
+    println!("  id: {}", output.record.id);
+    println!("  state: {}", output.state_file);
+    println!(
+        "  profile: {}",
+        serde_json::to_string(&output.profile_source).unwrap()
+    );
+    print_record_profile(&output.record, "  ");
+    if output.restart_required {
+        println!("  restart required: stop/start this VM to apply the generated microVM config");
+    }
+    if output.dry_run {
+        println!("  dry-run: no files written");
+    }
 }
 
 fn print_record_profile(vm: &VmRecord, prefix: &str) {

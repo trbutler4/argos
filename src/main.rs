@@ -185,6 +185,20 @@ enum VmCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Reapply this VM's repo profile or an explicit .argos.toml profile.
+    Update {
+        id: String,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        config: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        profile: Option<std::path::PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Build and start a local VM by id.
     Start {
         id: String,
@@ -353,6 +367,21 @@ fn main() -> ExitCode {
             } => vm::show(vm::ShowOptions {
                 id,
                 state_dir,
+                json,
+            }),
+            VmCommand::Update {
+                id,
+                state_dir,
+                config,
+                profile,
+                dry_run,
+                json,
+            } => vm::update(vm::UpdateOptions {
+                id,
+                state_dir,
+                config,
+                profile,
+                dry_run,
                 json,
             }),
             VmCommand::Up {

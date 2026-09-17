@@ -139,6 +139,9 @@ argos vm up "Trade Feature" --repo . --config ./config.local.toml
 argos vm up "Trade Feature" --repo . --no-attach
 argos vm show trade-feature
 argos vm show trade-feature --json
+argos vm update trade-feature
+argos vm update trade-feature --profile ./.argos.toml
+argos vm update trade-feature --dry-run
 argos vm start trade-feature --config ./config.local.toml
 argos vm logs trade-feature
 argos vm logs trade-feature --follow
