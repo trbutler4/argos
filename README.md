@@ -120,9 +120,12 @@ microVM runner, launches it in a dedicated tmux console session, waits for
 can read `[vm.guest_tmux]` from the selected Argos config and install either
 inline `config_text` or `config_path` contents as `/etc/tmux.conf` inside the
 guest. The VM mounts the per-VM work directory at `/workspace`, so a cloned
-repo is available at `/workspace/repo` by default. `shell` and `tmux` start
-there by default. Guests include flakes, a writable Nix store overlay, and enough
-default memory for small `nix develop` workflows. `show` reports one VM record,
+repo is available at `/workspace/repo` by default. If `--repo` points at a local
+checkout with an `origin`, Argos clones from that origin so the VM checkout can
+pull and push like a normal repo. The generated VM mounts the VM host's `~/.ssh`
+and copies its git config, so git uses that host's existing credentials.
+`shell` and `tmux` start there by default. Guests include flakes, a writable Nix
+store overlay, and enough default memory for small `nix develop` workflows. `show` reports one VM record,
 including package intent and `http://127.0.0.1:<host-port>` links. `up` is the
 normal repo workflow: it creates the VM if missing, starts it if needed, then
 hands off to the VM-owned tmux session. `stop` terminates the recorded local

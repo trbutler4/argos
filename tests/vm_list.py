@@ -105,7 +105,16 @@ guest = 5173
         source = root / "source.git"
         init = run("git", "init", "--bare", str(source))
         assert init.returncode == 0, init.stderr
-        dry = run(str(BINARY), "vm", "create", "Trade Feature", "--repo", str(source), "--project", "trade", "--state-dir", str(create_state), "--work-root", str(work_root), "--profile", str(profile), "--dry-run", "--json")
+        local_source = root / "local-source"
+        clone_source = run("git", "clone", str(source), str(local_source))
+        assert clone_source.returncode == 0, clone_source.stderr
+        fake_home = root / "home"
+        (fake_home / ".ssh").mkdir(parents=True)
+        (fake_home / ".ssh" / "known_hosts").write_text("example ssh-ed25519 AAAAhost\n")
+        (fake_home / ".gitconfig").write_text('[user]\n\tname = Argos Tester\n\temail = tester@example.invalid\n')
+        home_env = os.environ.copy()
+        home_env["HOME"] = str(fake_home)
+        dry = run(str(BINARY), "vm", "create", "Trade Feature", "--repo", str(local_source), "--project", "trade", "--state-dir", str(create_state), "--work-root", str(work_root), "--profile", str(profile), "--dry-run", "--json")
         assert dry.returncode == 0, dry.stderr
         dry_value = json.loads(dry.stdout)
         assert dry_value["dry_run"] is True and dry_value["record"]["id"] == "trade-feature"
@@ -116,7 +125,7 @@ guest = 5173
         assert invalid_config.returncode == 2 and "vm.guest_tmux" in invalid_config.stderr
         invalid_profile = run(str(BINARY), "vm", "create", "bad profile", "--state-dir", str(create_state), "--profile", str(bad_profile), "--json")
         assert invalid_profile.returncode == 1 and "invalid repo profile" in invalid_profile.stderr
-        created = run(str(BINARY), "vm", "create", "Trade Feature", "--repo", str(source), "--project", "trade", "--state-dir", str(create_state), "--work-root", str(work_root), "--config", str(argos_config), "--profile", str(profile), "--json")
+        created = run(str(BINARY), "vm", "create", "Trade Feature", "--repo", str(local_source), "--project", "trade", "--state-dir", str(create_state), "--work-root", str(work_root), "--config", str(argos_config), "--profile", str(profile), "--json", env=home_env)
         assert created.returncode == 0, created.stderr
         value = json.loads(created.stdout)
         assert value["dry_run"] is False
@@ -127,6 +136,10 @@ guest = 5173
         assert 'nix.settings.experimental-features = [ "nix-command" "flakes" ];' in microvm_text
         assert 'path = "/var/lib/argos/ssh/ssh_host_ed25519_key"' in microvm_text
         assert 'directory = /workspace/repo' in microvm_text
+        assert 'tag = "host-ssh";' in microvm_text
+        assert f'source = "{fake_home}/.ssh";' in microvm_text
+        assert 'mountPoint = "/root/.ssh";' in microvm_text
+        assert 'Argos Tester' in microvm_text
         assert "forwardPorts" in microvm_text
         assert "mem = 4096" in microvm_text
         assert 'writableStoreOverlay = "/nix/.rw-store"' in microvm_text
@@ -142,6 +155,7 @@ guest = 5173
         assert 'guest.port = 5173;' in microvm_text
         assert 'environment.etc."argos/tmux.conf".source = ./guest-tmux.conf' in microvm_text
         assert (Path(value["microvm_config"]).parent / "guest-tmux.conf").read_text() == tmux_conf.read_text()
+        assert value["record"]["source_repo"] == str(source)
         assert value["record"]["profile_path"] == str(profile)
         assert value["record"]["guest_workdir"] == "/workspace/repo"
         assert value["record"]["packages"] == ["go", "just"]
@@ -154,6 +168,8 @@ guest = 5173
         assert isinstance(value["record"]["ssh_port"], int)
         assert (Path(value["microvm_config"]).parent / "flake.nix").is_file()
         assert (work_root / "trade-feature" / "repo" / ".git").is_dir()
+        origin = run("git", "-C", str(work_root / "trade-feature" / "repo"), "remote", "get-url", "origin")
+        assert origin.returncode == 0 and origin.stdout.strip() == str(source)
         dry_existing_update = run(str(BINARY), "vm", "update", "trade-feature", "--state-dir", str(create_state), "--dry-run", "--json")
         assert dry_existing_update.returncode == 0, dry_existing_update.stderr
         assert json.loads(dry_existing_update.stdout)["profile_source"] == str(profile)
@@ -172,14 +188,14 @@ guest = 3001
 name = "admin"
 guest = 9090
 ''')
-        dry_update = run(str(BINARY), "vm", "update", "trade-feature", "--state-dir", str(create_state), "--dry-run", "--json")
+        dry_update = run(str(BINARY), "vm", "update", "trade-feature", "--state-dir", str(create_state), "--dry-run", "--json", env=home_env)
         assert dry_update.returncode == 0, dry_update.stderr
         dry_update_value = json.loads(dry_update.stdout)
         assert dry_update_value["dry_run"] is True
         assert dry_update_value["profile_source"] == str(repo_profile)
         assert dry_update_value["record"]["packages"] == ["jq"]
         assert json.loads((create_state / "vms" / "trade-feature.json").read_text())["packages"] == ["go", "just"]
-        updated = run(str(BINARY), "vm", "update", "trade-feature", "--state-dir", str(create_state), "--json")
+        updated = run(str(BINARY), "vm", "update", "trade-feature", "--state-dir", str(create_state), "--json", env=home_env)
         assert updated.returncode == 0, updated.stderr
         updated_value = json.loads(updated.stdout)
         assert updated_value["dry_run"] is False

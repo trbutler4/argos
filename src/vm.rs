@@ -529,7 +529,12 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
         None => state_root.join("workdirs"),
     };
     let workdir = work_root.join(&id);
-    let repo_path = options.repo.as_ref().map(|_| workdir.join("repo"));
+    let clone_repo = options
+        .repo
+        .as_ref()
+        .map(|repo| resolve_clone_source(repo))
+        .transpose()?;
+    let repo_path = clone_repo.as_ref().map(|_| workdir.join("repo"));
     let profile = load_repo_profile(options.profile.as_deref(), options.repo.as_deref())?;
     let guest_workdir = profile.profile.workspace.workdir.clone();
     let packages = profile.profile.vm.packages.clone();
@@ -542,7 +547,7 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
         status: "created".into(),
         host,
         project: options.project.clone(),
-        source_repo: options.repo.clone(),
+        source_repo: clone_repo,
         profile_path: profile.path.map(|path| path.display().to_string()),
         guest_workdir: Some(guest_workdir),
         packages,
@@ -818,6 +823,29 @@ fn create_vm_state(output: &mut VmCreateOutput, tmux_config: Option<&str>) -> Re
         ))
     })?;
     Ok(())
+}
+
+fn resolve_clone_source(repo: &str) -> Result<String, VmError> {
+    let path = Path::new(repo);
+    if !path.exists() {
+        return Ok(repo.to_string());
+    }
+    let output = Command::new("git")
+        .args(["-C", repo, "remote", "get-url", "origin"])
+        .output()
+        .map_err(|error| VmError {
+            code: "git_error",
+            message: format!("cannot inspect git origin for {repo}: {error}"),
+        })?;
+    if !output.status.success() {
+        return Ok(repo.to_string());
+    }
+    let origin = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if origin.is_empty() {
+        Ok(repo.to_string())
+    } else {
+        Ok(origin)
+    }
 }
 
 fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
@@ -2234,6 +2262,8 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
     let mac = mac_for_id(&record.id);
     let tmux_block = render_tmux_config_block(tmux_config);
     let tmux_store_shares = render_tmux_store_shares(tmux_config);
+    let host_git_shares = render_host_git_shares();
+    let git_config = render_git_config_text();
     let workspace_share = render_workspace_share(record);
     let workspace_virtiofsd = render_workspace_virtiofsd(record);
     let packages = render_system_packages(record);
@@ -2261,11 +2291,7 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
   }};
 
   environment.systemPackages = with pkgs; {packages};
-  environment.etc."gitconfig".text = ''
-    [safe]
-      directory = /workspace/repo
-      directory = /workspace
-  '';
+  environment.etc."gitconfig".text = {git_config};
   systemd.tmpfiles.rules = [ "d /var/lib/argos/ssh 0700 root root -" ];
 {tmux_block}
 {workspace_virtiofsd}
@@ -2306,7 +2332,7 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
         source = "/nix/store";
         mountPoint = "/nix/.ro-store";
       }}
-{tmux_store_shares}{workspace_share}    ];
+	{tmux_store_shares}{host_git_shares}{workspace_share}    ];
   }};
 }}
 "#,
@@ -2316,8 +2342,10 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
         mac = serde_json::to_string(&mac).unwrap(),
         ssh_port = ssh_port,
         tmux_block = tmux_block,
+        git_config = git_config,
         workspace_virtiofsd = workspace_virtiofsd,
         tmux_store_shares = tmux_store_shares,
+        host_git_shares = host_git_shares,
         workspace_share = workspace_share,
         packages = packages,
         firewall_ports = firewall_ports,
@@ -2456,6 +2484,42 @@ fn render_tmux_store_shares(tmux_config: Option<&str>) -> String {
         ));
     }
     out
+}
+
+fn render_host_git_shares() -> String {
+    let Some(home) = std::env::var_os("HOME") else {
+        return String::new();
+    };
+    let ssh_dir = Path::new(&home).join(".ssh");
+    if !ssh_dir.is_dir() {
+        return String::new();
+    }
+    let source = serde_json::to_string(&ssh_dir.display().to_string()).unwrap();
+    format!(
+        r#"      {{
+        proto = "9p";
+        tag = "host-ssh";
+        source = {source};
+        mountPoint = "/root/.ssh";
+      }}
+"#
+    )
+}
+
+fn render_git_config_text() -> String {
+    let mut text =
+        String::from("[safe]\n\tdirectory = /workspace/repo\n\tdirectory = /workspace\n");
+    if let Some(home) = std::env::var_os("HOME") {
+        let path = Path::new(&home).join(".gitconfig");
+        if let Ok(host_config) = fs::read_to_string(path) {
+            text.push_str("\n# Host git config copied by Argos for VM git workflows.\n");
+            text.push_str(&host_config);
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+        }
+    }
+    serde_json::to_string(&text).unwrap()
 }
 
 fn store_paths_in_text(text: &str) -> Vec<String> {
