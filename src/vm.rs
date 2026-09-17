@@ -213,6 +213,13 @@ pub(crate) struct StartOptions {
     pub(crate) json: bool,
 }
 
+pub(crate) struct LogsOptions {
+    pub(crate) id: String,
+    pub(crate) state_dir: Option<PathBuf>,
+    pub(crate) lines: usize,
+    pub(crate) follow: bool,
+}
+
 pub(crate) struct UpOptions {
     pub(crate) name: String,
     pub(crate) id: Option<String>,
@@ -368,6 +375,17 @@ pub(crate) fn start(options: StartOptions) -> ExitCode {
         print_start(&output);
     }
     ExitCode::SUCCESS
+}
+
+pub(crate) fn logs(options: LogsOptions) -> ExitCode {
+    match run_logs(options) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("error: {}: {}", error.code, error.message);
+            let code = if error.code == "invalid_args" { 2 } else { 1 };
+            ExitCode::from(code)
+        }
+    }
 }
 
 pub(crate) fn stop(options: StopOptions) -> ExitCode {
@@ -741,11 +759,8 @@ fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
             run_bin.display()
         )));
     }
-    let script = format!(
-        "exec {} 2>&1 | tee -a {}",
-        shell_quote(&run_bin.display().to_string()),
-        shell_quote(&log_path.display().to_string())
-    );
+    let virtiofsd_bin = runner_path.join("bin").join("argos-workspace-virtiofsd");
+    let script = render_runner_script(&run_bin, &virtiofsd_bin, &log_path);
     start_tmux_console(&console_session, &instance_dir, &script)?;
     wait_for_ready(&console_session, &log_path, &record.id)?;
     let pid = tmux_session_pid(&console_session)?;
@@ -820,6 +835,48 @@ fn stop_vm(options: StopOptions) -> Result<VmStopOutput, VmError> {
         pid,
         already_stopped,
         record,
+    })
+}
+
+fn run_logs(options: LogsOptions) -> Result<ExitCode, VmError> {
+    if !valid_id(&options.id) {
+        return Err(invalid_args(
+            "VM id must be 1-64 chars of letters, digits, '_' or '-'",
+        ));
+    }
+    let state_root = state_root(options.state_dir)?;
+    let state_file = state_root.join("vms").join(format!("{}.json", options.id));
+    let record = load_record(&state_file)?;
+    let instance_dir = record
+        .instance_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_root.join("instances").join(&record.id));
+    let log_path = record
+        .log_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| instance_dir.join("console.log"));
+    if !log_path.is_file() {
+        return Err(VmError {
+            code: "state_error",
+            message: format!("VM log does not exist: {}", log_path.display()),
+        });
+    }
+    let mut command = Command::new("tail");
+    command.arg("-n").arg(options.lines.to_string());
+    if options.follow {
+        command.arg("-f");
+    }
+    command.arg(log_path);
+    let status = command.status().map_err(|error| VmError {
+        code: "log_error",
+        message: format!("cannot execute tail: {error}"),
+    })?;
+    Ok(if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(status.code().unwrap_or(1) as u8)
     })
 }
 
@@ -1276,8 +1333,9 @@ fn refresh_guest_known_hosts(record: &VmRecord, instance_dir: &Path) -> Result<(
 }
 
 fn scan_guest_host_key(host: &str, port: u16) -> Result<String, VmError> {
+    let args = ssh_keyscan_args(host, port);
     let output = Command::new("ssh-keyscan")
-        .args(["-T", "5", "-p", &port.to_string(), host])
+        .args(&args)
         .output()
         .map_err(|error| VmError {
             code: "ssh_error",
@@ -1303,6 +1361,18 @@ fn scan_guest_host_key(host: &str, port: u16) -> Result<String, VmError> {
         });
     }
     Ok(format!("{keys}\n"))
+}
+
+fn ssh_keyscan_args(host: &str, port: u16) -> Vec<String> {
+    vec![
+        "-T".into(),
+        "5".into(),
+        "-t".into(),
+        "ed25519".into(),
+        "-p".into(),
+        port.to_string(),
+        host.into(),
+    ]
 }
 
 fn start_tmux_console(session: &str, instance_dir: &Path, script: &str) -> Result<(), VmError> {
@@ -1752,6 +1822,7 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
     let tmux_block = render_tmux_config_block(tmux_config);
     let tmux_store_shares = render_tmux_store_shares(tmux_config);
     let workspace_share = render_workspace_share(record);
+    let workspace_virtiofsd = render_workspace_virtiofsd(record);
     let packages = render_system_packages(record);
     let firewall_ports = render_firewall_ports(record);
     let app_forwards = render_app_port_forwards(record);
@@ -1784,6 +1855,7 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
   '';
   systemd.tmpfiles.rules = [ "d /var/lib/argos/ssh 0700 root root -" ];
 {tmux_block}
+{workspace_virtiofsd}
   systemd.services.argos-ready = {{
     description = "Argos VM readiness marker";
     wantedBy = [ "multi-user.target" ];
@@ -1831,6 +1903,7 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
         mac = serde_json::to_string(&mac).unwrap(),
         ssh_port = ssh_port,
         tmux_block = tmux_block,
+        workspace_virtiofsd = workspace_virtiofsd,
         tmux_store_shares = tmux_store_shares,
         workspace_share = workspace_share,
         packages = packages,
@@ -1884,13 +1957,59 @@ fn render_workspace_share(record: &VmRecord) -> String {
     };
     format!(
         r#"      {{
-        proto = "9p";
+        proto = "virtiofs";
         tag = "workspace";
+        socket = "workspace-virtiofs.sock";
         source = {source};
         mountPoint = "/workspace";
       }}
 "#,
         source = serde_json::to_string(workdir).unwrap(),
+    )
+}
+
+fn render_workspace_virtiofsd(record: &VmRecord) -> String {
+    let Some(workdir) = record.workdir.as_deref() else {
+        return String::new();
+    };
+    format!(
+        r#"
+  microvm.binScripts.argos-workspace-virtiofsd = ''
+    exec ${{lib.getExe config.microvm.virtiofsd.package}} \
+      --socket-path=workspace-virtiofs.sock \
+      --shared-dir={source} \
+      --thread-pool-size 4 \
+      --cache=auto \
+      --inode-file-handles=prefer
+  '';
+"#,
+        source = shell_quote(workdir),
+    )
+}
+
+fn render_runner_script(run_bin: &Path, virtiofsd_bin: &Path, log_path: &Path) -> String {
+    format!(
+        r#"set -e
+virtiofsd_pid=""
+if [ -x {virtiofsd} ]; then
+  {virtiofsd} 2>&1 &
+  virtiofsd_pid=$!
+  trap 'if [ -n "$virtiofsd_pid" ]; then kill "$virtiofsd_pid" 2>/dev/null || true; fi' EXIT INT TERM
+  for _ in $(seq 1 100); do
+    if find . -maxdepth 1 -name '*-virtiofs.sock' -type s | grep -q .; then
+      break
+    fi
+    if ! kill -0 "$virtiofsd_pid" 2>/dev/null; then
+      wait "$virtiofsd_pid"
+    fi
+    sleep 0.1
+  done
+fi
+{run} 2>&1 | tee -a {log}
+"#,
+        virtiofsd = shell_quote(&virtiofsd_bin.display().to_string()),
+        run = shell_quote(&run_bin.display().to_string()),
+        log = shell_quote(&log_path.display().to_string()),
     )
 }
 
@@ -2042,6 +2161,14 @@ mod tests {
         if Path::new(root).exists() {
             assert_eq!(paths, vec![root.to_string()]);
         }
+    }
+
+    #[test]
+    fn scans_only_guest_ed25519_host_key() {
+        assert_eq!(
+            ssh_keyscan_args("127.0.0.1", 32026),
+            vec!["-T", "5", "-t", "ed25519", "-p", "32026", "127.0.0.1"]
+        );
     }
 
     #[test]

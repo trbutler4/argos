@@ -195,6 +195,16 @@ enum VmCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Print or follow a local VM's console log.
+    Logs {
+        id: String,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = 200)]
+        lines: usize,
+        #[arg(short, long)]
+        follow: bool,
+    },
     /// Stop a local VM by id.
     Stop {
         id: String,
@@ -368,6 +378,17 @@ fn main() -> ExitCode {
                 state_dir,
                 config,
                 json,
+            }),
+            VmCommand::Logs {
+                id,
+                state_dir,
+                lines,
+                follow,
+            } => vm::logs(vm::LogsOptions {
+                id,
+                state_dir,
+                lines,
+                follow,
             }),
             VmCommand::Stop {
                 id,

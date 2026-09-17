@@ -132,6 +132,9 @@ guest = 5173
         assert 'writableStoreOverlay = "/nix/.rw-store"' in microvm_text
         assert 'image = "nix-store-overlay.img"' in microvm_text
         assert 'mountPoint = "/workspace"' in microvm_text
+        assert 'proto = "virtiofs";' in microvm_text
+        assert 'tag = "workspace";' in microvm_text
+        assert 'socket = ' in microvm_text and 'workspace-virtiofs.sock' in microvm_text
         assert f'source = "{work_root}/trade-feature"' in microvm_text
         assert 'environment.systemPackages = with pkgs; [ git tmux openssh go just ];' in microvm_text
         assert 'networking.firewall.allowedTCPPorts = [ 22 3001 5173 ];' in microvm_text
@@ -214,6 +217,9 @@ out.symlink_to(runner)
         assert start_value["console_session"] == "argos-vm-trade-feature"
         assert start_value["record"]["console_session"] == "argos-vm-trade-feature"
         assert Path(start_value["log_path"]).read_text().count("ARGOS_VM_READY id=trade-feature") == 1
+        logs = run(str(BINARY), "vm", "logs", "trade-feature", "--state-dir", str(create_state), "--lines", "5")
+        assert logs.returncode == 0, logs.stderr
+        assert "ARGOS_VM_READY id=trade-feature" in logs.stdout
         assert (Path(value["microvm_config"]).parent / "guest-tmux.conf").read_text() == "set -g status-right inline"
         assert run("tmux", "has-session", "-t", "argos-vm-trade-feature").returncode == 0
         shell = run(str(BINARY), "vm", "shell", "trade-feature", "--state-dir", str(create_state))
@@ -255,7 +261,7 @@ out.symlink_to(runner)
         (vms / "bad.json").write_text(json.dumps(record("bad/slash")))
         bad = run(str(BINARY), "vm", "list", "--state-dir", str(state), "--json")
         assert bad.returncode == 1 and "invalid_state" in bad.stderr
-    print("PASS: VM create/start/shell/tmux/stop/list manages deterministic local state, guest SSH metadata, guest tmux config injection, tmux process lifecycle, clone/config scaffolds, malformed state, fake local runner lifecycle, and no remote hosts.")
+    print("PASS: VM create/start/logs/shell/tmux/stop/list manages deterministic local state, guest SSH metadata, guest tmux config injection, tmux process lifecycle, clone/config scaffolds, malformed state, fake local runner lifecycle, and no remote hosts.")
 
 
 if __name__ == "__main__":

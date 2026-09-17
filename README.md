@@ -127,6 +127,8 @@ including package intent and `http://127.0.0.1:<host-port>` links. `up` is the
 normal repo workflow: it creates the VM if missing, starts it if needed, then
 hands off to the VM-owned tmux session. `stop` terminates the recorded local
 process and keeps persistent instance data.
+`logs` prints or follows the VM serial console log for boot and guest-kernel
+debugging.
 
 ```sh
 argos vm list
@@ -138,6 +140,8 @@ argos vm up "Trade Feature" --repo . --no-attach
 argos vm show trade-feature
 argos vm show trade-feature --json
 argos vm start trade-feature --config ./config.local.toml
+argos vm logs trade-feature
+argos vm logs trade-feature --follow
 argos vm shell trade-feature
 argos vm tmux trade-feature
 argos sessions attach vm:trade-feature
