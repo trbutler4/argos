@@ -213,6 +213,18 @@ enum VmCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Stop and remove a local VM's record, instance data, and work directory.
+    Rm {
+        id: String,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// SSH into a local VM guest shell.
     Shell {
         id: String,
@@ -397,6 +409,19 @@ fn main() -> ExitCode {
             } => vm::stop(vm::StopOptions {
                 id,
                 state_dir,
+                json,
+            }),
+            VmCommand::Rm {
+                id,
+                state_dir,
+                force,
+                dry_run,
+                json,
+            } => vm::remove(vm::RemoveOptions {
+                id,
+                state_dir,
+                force,
+                dry_run,
                 json,
             }),
             VmCommand::Shell { id, state_dir } => vm::guest_command(vm::GuestCommandOptions {

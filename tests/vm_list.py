@@ -244,6 +244,23 @@ out.symlink_to(runner)
         stopped_again = run(str(BINARY), "vm", "stop", "trade-feature", "--state-dir", str(create_state), "--json")
         assert stopped_again.returncode == 0, stopped_again.stderr
         assert json.loads(stopped_again.stdout)["already_stopped"] is True
+        refused_rm = run(str(BINARY), "vm", "rm", "trade-feature", "--state-dir", str(create_state))
+        assert refused_rm.returncode == 2 and "--force" in refused_rm.stderr
+        dry_rm = run(str(BINARY), "vm", "rm", "trade-feature", "--state-dir", str(create_state), "--dry-run", "--json")
+        assert dry_rm.returncode == 0, dry_rm.stderr
+        dry_rm_value = json.loads(dry_rm.stdout)
+        assert dry_rm_value["dry_run"] is True and dry_rm_value["removed"] is False
+        assert (create_state / "vms" / "trade-feature.json").is_file()
+        assert (work_root / "trade-feature").is_dir()
+        removed = run(str(BINARY), "vm", "rm", "trade-feature", "--state-dir", str(create_state), "--force", "--json")
+        assert removed.returncode == 0, removed.stderr
+        removed_value = json.loads(removed.stdout)
+        assert removed_value["removed"] is True and removed_value["stopped"]["already_stopped"] is True
+        assert not (create_state / "vms" / "trade-feature.json").exists()
+        assert not Path(value["instance_dir"]).exists()
+        assert not (work_root / "trade-feature").exists()
+        removed_show = run(str(BINARY), "vm", "show", "trade-feature", "--state-dir", str(create_state), "--json")
+        assert removed_show.returncode == 1 and "VM state does not exist" in removed_show.stderr
 
         up_new = run(str(BINARY), "vm", "up", "Up Feature", "--repo", str(source), "--state-dir", str(create_state), "--work-root", str(work_root), "--profile", str(profile), "--config", str(inline_config), "--json", env=fake_env)
         assert up_new.returncode == 0, up_new.stderr
@@ -261,7 +278,7 @@ out.symlink_to(runner)
         (vms / "bad.json").write_text(json.dumps(record("bad/slash")))
         bad = run(str(BINARY), "vm", "list", "--state-dir", str(state), "--json")
         assert bad.returncode == 1 and "invalid_state" in bad.stderr
-    print("PASS: VM create/start/logs/shell/tmux/stop/list manages deterministic local state, guest SSH metadata, guest tmux config injection, tmux process lifecycle, clone/config scaffolds, malformed state, fake local runner lifecycle, and no remote hosts.")
+    print("PASS: VM create/start/logs/shell/tmux/stop/rm/list manages deterministic local state, guest SSH metadata, guest tmux config injection, tmux process lifecycle, clone/config scaffolds, malformed state, fake local runner lifecycle, and no remote hosts.")
 
 
 if __name__ == "__main__":

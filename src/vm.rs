@@ -174,6 +174,19 @@ struct VmStopOutput {
 }
 
 #[derive(Debug, Serialize)]
+struct VmRemoveOutput {
+    schema_version: u32,
+    state_root: String,
+    state_file: String,
+    instance_dir: Option<String>,
+    workdir: Option<String>,
+    dry_run: bool,
+    removed: bool,
+    stopped: Option<VmStopOutput>,
+    record: VmRecord,
+}
+
+#[derive(Debug, Serialize)]
 struct VmUpOutput {
     schema_version: u32,
     created: bool,
@@ -237,6 +250,14 @@ pub(crate) struct UpOptions {
 pub(crate) struct StopOptions {
     pub(crate) id: String,
     pub(crate) state_dir: Option<PathBuf>,
+    pub(crate) json: bool,
+}
+
+pub(crate) struct RemoveOptions {
+    pub(crate) id: String,
+    pub(crate) state_dir: Option<PathBuf>,
+    pub(crate) force: bool,
+    pub(crate) dry_run: bool,
     pub(crate) json: bool,
 }
 
@@ -402,6 +423,24 @@ pub(crate) fn stop(options: StopOptions) -> ExitCode {
         println!("{}", serde_json::to_string(&output).unwrap());
     } else {
         print_stop(&output);
+    }
+    ExitCode::SUCCESS
+}
+
+pub(crate) fn remove(options: RemoveOptions) -> ExitCode {
+    let json = options.json;
+    let output = match remove_vm(options) {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("error: {}: {}", error.code, error.message);
+            let code = if error.code == "invalid_args" { 2 } else { 1 };
+            return ExitCode::from(code);
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string(&output).unwrap());
+    } else {
+        print_remove(&output);
     }
     ExitCode::SUCCESS
 }
@@ -838,6 +877,80 @@ fn stop_vm(options: StopOptions) -> Result<VmStopOutput, VmError> {
     })
 }
 
+fn remove_vm(options: RemoveOptions) -> Result<VmRemoveOutput, VmError> {
+    if !valid_id(&options.id) {
+        return Err(invalid_args(
+            "VM id must be 1-64 chars of letters, digits, '_' or '-'",
+        ));
+    }
+    if !options.force && !options.dry_run {
+        return Err(invalid_args(
+            "vm rm is destructive; rerun with --force or preview with --dry-run",
+        ));
+    }
+
+    let state_root = state_root(options.state_dir.clone())?;
+    let state_file = state_root.join("vms").join(format!("{}.json", options.id));
+    let record = load_record(&state_file)?;
+    let instance_dir = record
+        .instance_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_root.join("instances").join(&record.id));
+    let workdir = record.workdir.as_ref().map(PathBuf::from);
+    let instance_dir = removable_vm_dir(instance_dir, &record.id, "instance_dir")?;
+    let workdir = workdir
+        .map(|path| removable_vm_dir(path, &record.id, "workdir"))
+        .transpose()?;
+
+    if options.dry_run {
+        return Ok(VmRemoveOutput {
+            schema_version: 1,
+            state_root: state_root.display().to_string(),
+            state_file: state_file.display().to_string(),
+            instance_dir: Some(instance_dir.display().to_string()),
+            workdir: workdir.as_ref().map(|path| path.display().to_string()),
+            dry_run: true,
+            removed: false,
+            stopped: None,
+            record,
+        });
+    }
+
+    let stopped = stop_vm(StopOptions {
+        id: record.id.clone(),
+        state_dir: Some(state_root.clone()),
+        json: false,
+    })?;
+
+    remove_dir_if_exists(&instance_dir, "instance directory")?;
+    if let Some(workdir) = &workdir
+        && workdir != &instance_dir
+    {
+        remove_dir_if_exists(workdir, "work directory")?;
+    }
+    if state_file.exists() {
+        fs::remove_file(&state_file).map_err(|error| {
+            state_error(format!(
+                "cannot remove VM state file {}: {error}",
+                state_file.display()
+            ))
+        })?;
+    }
+
+    Ok(VmRemoveOutput {
+        schema_version: 1,
+        state_root: state_root.display().to_string(),
+        state_file: state_file.display().to_string(),
+        instance_dir: Some(instance_dir.display().to_string()),
+        workdir: workdir.as_ref().map(|path| path.display().to_string()),
+        dry_run: false,
+        removed: true,
+        stopped: Some(stopped),
+        record,
+    })
+}
+
 fn run_logs(options: LogsOptions) -> Result<ExitCode, VmError> {
     if !valid_id(&options.id) {
         return Err(invalid_args(
@@ -877,6 +990,40 @@ fn run_logs(options: LogsOptions) -> Result<ExitCode, VmError> {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(status.code().unwrap_or(1) as u8)
+    })
+}
+
+fn removable_vm_dir(path: PathBuf, id: &str, kind: &str) -> Result<PathBuf, VmError> {
+    if !path.is_absolute() {
+        return Err(state_error(format!(
+            "refusing to remove {kind} with non-absolute path: {}",
+            path.display()
+        )));
+    }
+    if path.file_name().and_then(|name| name.to_str()) != Some(id) {
+        return Err(state_error(format!(
+            "refusing to remove {kind} because it does not end with VM id {id:?}: {}",
+            path.display()
+        )));
+    }
+    if path.exists() && !path.is_dir() {
+        return Err(state_error(format!(
+            "refusing to remove {kind} because it is not a directory: {}",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
+fn remove_dir_if_exists(path: &Path, label: &str) -> Result<(), VmError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_dir_all(path).map_err(|error| {
+        state_error(format!(
+            "cannot remove VM {label} {}: {error}",
+            path.display()
+        ))
     })
 }
 
@@ -1784,6 +1931,33 @@ fn print_stop(output: &VmStopOutput) {
     println!("  id: {}", output.record.id);
     if let Some(pid) = output.pid {
         println!("  previous pid: {pid}");
+    }
+}
+
+fn print_remove(output: &VmRemoveOutput) {
+    println!(
+        "{} {}",
+        if output.dry_run {
+            "would remove"
+        } else {
+            "removed"
+        },
+        serde_json::to_string(&output.record.name).unwrap()
+    );
+    println!("  id: {}", output.record.id);
+    println!("  state: {}", output.state_file);
+    if let Some(instance_dir) = &output.instance_dir {
+        println!("  instance: {instance_dir}");
+    }
+    if let Some(workdir) = &output.workdir {
+        println!("  workdir: {workdir}");
+    }
+    if output.dry_run {
+        println!("  dry-run: no files removed; rerun with --force to remove");
+    } else if let Some(stopped) = &output.stopped
+        && !stopped.already_stopped
+    {
+        println!("  stopped running VM before removal");
     }
 }
 

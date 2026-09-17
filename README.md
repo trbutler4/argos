@@ -142,6 +142,8 @@ argos vm show trade-feature --json
 argos vm start trade-feature --config ./config.local.toml
 argos vm logs trade-feature
 argos vm logs trade-feature --follow
+argos vm rm trade-feature --dry-run
+argos vm rm trade-feature --force
 argos vm shell trade-feature
 argos vm tmux trade-feature
 argos sessions attach vm:trade-feature
