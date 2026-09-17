@@ -264,7 +264,7 @@ enum TaskCommand {
     Create {
         task: String,
         #[arg(long, value_name = "REPO")]
-        repo: String,
+        repo: Option<String>,
         #[arg(long, value_name = "NAME")]
         project: Option<String>,
         #[arg(long, value_name = "ID")]
@@ -288,7 +288,7 @@ enum TaskCommand {
     Up {
         task: String,
         #[arg(long, value_name = "REPO")]
-        repo: String,
+        repo: Option<String>,
         #[arg(long, value_name = "NAME")]
         project: Option<String>,
         #[arg(long, value_name = "ID")]

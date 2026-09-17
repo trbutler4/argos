@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("ARGOS_BINARY", ROOT / "target/debug/argos")).resolve()
 
 
-def run(*args, env=None):
-    return subprocess.run(args, env=env, text=True, capture_output=True, timeout=10)
+def run(*args, env=None, cwd=None):
+    return subprocess.run(args, env=env, cwd=cwd, text=True, capture_output=True, timeout=10)
 
 
 def record(vm_id, **overrides):
@@ -337,6 +337,14 @@ out.symlink_to(runner)
         assert task_value["record"]["name"] == "local-source: Fix Indexer"
         assert task_value["record"]["project"] == "local-source"
         assert (work_root / "local-source-fix-indexer" / "repo" / ".git").is_dir()
+        current_repo_task = run(str(BINARY), "task", "create", "Current Repo", "--state-dir", str(create_state), "--work-root", str(work_root), "--profile", str(profile), "--dry-run", "--json", cwd=local_source)
+        assert current_repo_task.returncode == 0, current_repo_task.stderr
+        current_repo_value = json.loads(current_repo_task.stdout)
+        assert current_repo_value["record"]["id"] == "local-source-current-repo"
+        assert current_repo_value["record"]["project"] == "local-source"
+        assert current_repo_value["record"]["source_repo"] == str(source)
+        missing_repo = run(str(BINARY), "task", "create", "No Repo", "--state-dir", str(create_state), "--dry-run", cwd=root)
+        assert missing_repo.returncode == 2 and "--repo is required" in missing_repo.stderr
         task_human = run(str(BINARY), "task", "create", "Custom", "--repo", str(local_source), "--project", "qvattro", "--id", "qvattro-custom", "--state-dir", str(create_state), "--work-root", str(work_root), "--profile", str(profile), "--dry-run")
         assert task_human.returncode == 0, task_human.stderr
         assert 'would create "qvattro: Custom"' in task_human.stdout

@@ -233,7 +233,7 @@ pub(crate) struct CreateOptions {
 
 pub(crate) struct TaskCreateOptions {
     pub(crate) task: String,
-    pub(crate) repo: String,
+    pub(crate) repo: Option<String>,
     pub(crate) project: Option<String>,
     pub(crate) id: Option<String>,
     pub(crate) host: Option<String>,
@@ -247,7 +247,7 @@ pub(crate) struct TaskCreateOptions {
 
 pub(crate) struct TaskUpOptions {
     pub(crate) task: String,
-    pub(crate) repo: String,
+    pub(crate) repo: Option<String>,
     pub(crate) project: Option<String>,
     pub(crate) id: Option<String>,
     pub(crate) host: Option<String>,
@@ -381,9 +381,16 @@ pub(crate) fn create(options: CreateOptions) -> ExitCode {
 }
 
 pub(crate) fn task_create(options: TaskCreateOptions) -> ExitCode {
+    let repo = match task_repo_or_current(options.repo) {
+        Ok(repo) => repo,
+        Err(error) => {
+            eprintln!("error: {}", error.message);
+            return ExitCode::from(2);
+        }
+    };
     let task = match task_vm_identity(
         &options.task,
-        &options.repo,
+        &repo,
         options.project.as_deref(),
         options.id.clone(),
     ) {
@@ -396,7 +403,7 @@ pub(crate) fn task_create(options: TaskCreateOptions) -> ExitCode {
     create(CreateOptions {
         name: task.name,
         id: Some(task.id),
-        repo: Some(options.repo),
+        repo: Some(repo),
         project: Some(task.project),
         host: options.host,
         state_dir: options.state_dir,
@@ -409,9 +416,16 @@ pub(crate) fn task_create(options: TaskCreateOptions) -> ExitCode {
 }
 
 pub(crate) fn task_up(options: TaskUpOptions) -> ExitCode {
+    let repo = match task_repo_or_current(options.repo) {
+        Ok(repo) => repo,
+        Err(error) => {
+            eprintln!("error: {}", error.message);
+            return ExitCode::from(2);
+        }
+    };
     let task = match task_vm_identity(
         &options.task,
-        &options.repo,
+        &repo,
         options.project.as_deref(),
         options.id.clone(),
     ) {
@@ -424,7 +438,7 @@ pub(crate) fn task_up(options: TaskUpOptions) -> ExitCode {
     up(UpOptions {
         name: task.name,
         id: Some(task.id),
-        repo: Some(options.repo),
+        repo: Some(repo),
         project: Some(task.project),
         host: options.host,
         state_dir: options.state_dir,
@@ -935,6 +949,37 @@ fn resolve_clone_source(repo: &str) -> Result<String, VmError> {
         Ok(repo.to_string())
     } else {
         Ok(origin)
+    }
+}
+
+fn task_repo_or_current(repo: Option<String>) -> Result<String, VmError> {
+    match repo {
+        Some(repo) if repo.trim().is_empty() => Err(invalid_args("--repo must not be empty")),
+        Some(repo) => Ok(repo),
+        None => current_git_repo(),
+    }
+}
+
+fn current_git_repo() -> Result<String, VmError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|error| VmError {
+            code: "git_error",
+            message: format!("cannot inspect current git repository: {error}"),
+        })?;
+    if !output.status.success() {
+        return Err(invalid_args(
+            "--repo is required unless the current directory is inside a git repo",
+        ));
+    }
+    let repo = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if repo.is_empty() {
+        Err(invalid_args(
+            "--repo is required unless the current directory is inside a git repo",
+        ))
+    } else {
+        Ok(repo)
     }
 }
 

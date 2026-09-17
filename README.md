@@ -133,14 +133,17 @@ Create or enter a task VM for a repo:
 
 ```sh
 cd ~/Projects/my-repo
-argos task create "fix auth" --repo .
-argos task up "fix auth" --repo .
+argos task create "fix auth"
+argos task up "fix auth"
 ```
 
 Task commands derive a VM id from the repo name and task name. For example,
 `argos task create "fix auth" --repo ~/Projects/account` creates a VM named
 `account: fix auth` with id `account-fix-auth`. Use `--project` or `--id` when
 you want explicit naming.
+
+When `--repo` is omitted, Argos uses the current git repository. Pass `--repo`
+explicitly when creating a task VM from outside the repo.
 
 Lower-level VM commands are still available:
 
