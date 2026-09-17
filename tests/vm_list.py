@@ -217,7 +217,7 @@ guest = 9090
         assert shown["record"]["ports"] == updated_value["record"]["ports"]
         show_human = run(str(BINARY), "vm", "show", "trade-feature", "--state-dir", str(create_state))
         assert show_human.returncode == 0, show_human.stderr
-        assert "links:" in show_human.stdout and "api: http://127.0.0.1:" in show_human.stdout
+        assert "ports:" in show_human.stdout and "api: guest:3001 -> host:http://127.0.0.1:" in show_human.stdout
         second = run(str(BINARY), "vm", "create", "Trade Feature Two", "--repo", str(source), "--state-dir", str(create_state), "--work-root", str(work_root), "--profile", str(profile), "--json")
         assert second.returncode == 0, second.stderr
         second_value = json.loads(second.stdout)
@@ -326,9 +326,30 @@ out.symlink_to(runner)
         assert (work_root / "up-feature" / "repo" / ".git").is_dir()
         up_human = run(str(BINARY), "vm", "up", "Up Feature", "--state-dir", str(create_state), "--config", str(inline_config), "--no-attach", env=fake_env)
         assert up_human.returncode == 0, up_human.stderr
-        assert "already running" in up_human.stdout and "attach: argos sessions attach vm:up-feature" in up_human.stdout
+        assert "already running" in up_human.stdout and "tmux: argos vm tmux up-feature" in up_human.stdout
         stopped_up = run(str(BINARY), "vm", "stop", "up-feature", "--state-dir", str(create_state), "--json")
         assert stopped_up.returncode == 0, stopped_up.stderr
+
+        task_created = run(str(BINARY), "task", "create", "Fix Indexer", "--repo", str(local_source), "--state-dir", str(create_state), "--work-root", str(work_root), "--profile", str(profile), "--json")
+        assert task_created.returncode == 0, task_created.stderr
+        task_value = json.loads(task_created.stdout)
+        assert task_value["record"]["id"] == "local-source-fix-indexer"
+        assert task_value["record"]["name"] == "local-source: Fix Indexer"
+        assert task_value["record"]["project"] == "local-source"
+        assert (work_root / "local-source-fix-indexer" / "repo" / ".git").is_dir()
+        task_human = run(str(BINARY), "task", "create", "Custom", "--repo", str(local_source), "--project", "qvattro", "--id", "qvattro-custom", "--state-dir", str(create_state), "--work-root", str(work_root), "--profile", str(profile), "--dry-run")
+        assert task_human.returncode == 0, task_human.stderr
+        assert 'would create "qvattro: Custom"' in task_human.stdout
+        assert "ports:" in task_human.stdout and "guest:3001 -> host:http://127.0.0.1:" in task_human.stdout
+        task_up = run(str(BINARY), "task", "up", "Ship UI", "--repo", str(local_source), "--project", "qvattro", "--state-dir", str(create_state), "--work-root", str(work_root), "--profile", str(profile), "--config", str(inline_config), "--json", env=fake_env)
+        assert task_up.returncode == 0, task_up.stderr
+        task_up_value = json.loads(task_up.stdout)
+        assert task_up_value["created"] is True
+        assert task_up_value["start"]["record"]["id"] == "qvattro-ship-ui"
+        assert task_up_value["start"]["record"]["project"] == "qvattro"
+        assert task_up_value["start"]["record"]["status"] == "running"
+        stopped_task = run(str(BINARY), "vm", "stop", "qvattro-ship-ui", "--state-dir", str(create_state), "--json")
+        assert stopped_task.returncode == 0, stopped_task.stderr
 
         (vms / "bad.json").write_text(json.dumps(record("bad/slash")))
         bad = run(str(BINARY), "vm", "list", "--state-dir", str(state), "--json")

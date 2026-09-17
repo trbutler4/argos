@@ -211,6 +211,12 @@ struct VmError {
     message: String,
 }
 
+struct TaskVmIdentity {
+    project: String,
+    name: String,
+    id: String,
+}
+
 pub(crate) struct CreateOptions {
     pub(crate) name: String,
     pub(crate) id: Option<String>,
@@ -222,6 +228,34 @@ pub(crate) struct CreateOptions {
     pub(crate) config: Option<PathBuf>,
     pub(crate) profile: Option<PathBuf>,
     pub(crate) dry_run: bool,
+    pub(crate) json: bool,
+}
+
+pub(crate) struct TaskCreateOptions {
+    pub(crate) task: String,
+    pub(crate) repo: String,
+    pub(crate) project: Option<String>,
+    pub(crate) id: Option<String>,
+    pub(crate) host: Option<String>,
+    pub(crate) state_dir: Option<PathBuf>,
+    pub(crate) work_root: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
+    pub(crate) profile: Option<PathBuf>,
+    pub(crate) dry_run: bool,
+    pub(crate) json: bool,
+}
+
+pub(crate) struct TaskUpOptions {
+    pub(crate) task: String,
+    pub(crate) repo: String,
+    pub(crate) project: Option<String>,
+    pub(crate) id: Option<String>,
+    pub(crate) host: Option<String>,
+    pub(crate) state_dir: Option<PathBuf>,
+    pub(crate) work_root: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
+    pub(crate) profile: Option<PathBuf>,
+    pub(crate) no_attach: bool,
     pub(crate) json: bool,
 }
 
@@ -344,6 +378,62 @@ pub(crate) fn create(options: CreateOptions) -> ExitCode {
         print_create(&output);
     }
     ExitCode::SUCCESS
+}
+
+pub(crate) fn task_create(options: TaskCreateOptions) -> ExitCode {
+    let task = match task_vm_identity(
+        &options.task,
+        &options.repo,
+        options.project.as_deref(),
+        options.id.clone(),
+    ) {
+        Ok(identity) => identity,
+        Err(error) => {
+            eprintln!("error: {}", error.message);
+            return ExitCode::from(2);
+        }
+    };
+    create(CreateOptions {
+        name: task.name,
+        id: Some(task.id),
+        repo: Some(options.repo),
+        project: Some(task.project),
+        host: options.host,
+        state_dir: options.state_dir,
+        work_root: options.work_root,
+        config: options.config,
+        profile: options.profile,
+        dry_run: options.dry_run,
+        json: options.json,
+    })
+}
+
+pub(crate) fn task_up(options: TaskUpOptions) -> ExitCode {
+    let task = match task_vm_identity(
+        &options.task,
+        &options.repo,
+        options.project.as_deref(),
+        options.id.clone(),
+    ) {
+        Ok(identity) => identity,
+        Err(error) => {
+            eprintln!("error: {}", error.message);
+            return ExitCode::from(2);
+        }
+    };
+    up(UpOptions {
+        name: task.name,
+        id: Some(task.id),
+        repo: Some(options.repo),
+        project: Some(task.project),
+        host: options.host,
+        state_dir: options.state_dir,
+        work_root: options.work_root,
+        config: options.config,
+        profile: options.profile,
+        no_attach: options.no_attach,
+        json: options.json,
+    })
 }
 
 pub(crate) fn show(options: ShowOptions) -> ExitCode {
@@ -1987,6 +2077,62 @@ fn slug(value: &str) -> String {
     out
 }
 
+fn task_vm_identity(
+    task: &str,
+    repo: &str,
+    project: Option<&str>,
+    explicit_id: Option<String>,
+) -> Result<TaskVmIdentity, VmError> {
+    let project = match project {
+        Some(project) if project.trim().is_empty() => {
+            return Err(invalid_args("--project must not be empty"));
+        }
+        Some(project) => project.trim().to_string(),
+        None => project_name_from_repo(repo).unwrap_or_else(|| "repo".into()),
+    };
+    if task.trim().is_empty() {
+        return Err(invalid_args("task name must not be empty"));
+    }
+    let id = explicit_id.unwrap_or_else(|| slug(&format!("{}-{}", project, task)));
+    if !valid_id(&id) {
+        return Err(invalid_args(
+            "VM id must be 1-64 chars of letters, digits, '_' or '-'",
+        ));
+    }
+    Ok(TaskVmIdentity {
+        name: format!("{}: {}", project, task.trim()),
+        project,
+        id,
+    })
+}
+
+fn project_name_from_repo(repo: &str) -> Option<String> {
+    let trimmed = repo.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = Path::new(trimmed);
+    if path.exists() {
+        let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if let Some(candidate) = path.file_name().and_then(|name| name.to_str()) {
+            let candidate = candidate.strip_suffix(".git").unwrap_or(candidate).trim();
+            if !candidate.is_empty() {
+                return Some(candidate.to_string());
+            }
+        }
+    }
+    let candidate = Path::new(trimmed)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .or_else(|| trimmed.rsplit(['/', ':']).next())?;
+    let candidate = candidate.strip_suffix(".git").unwrap_or(candidate).trim();
+    if candidate.is_empty() {
+        None
+    } else {
+        Some(candidate.to_string())
+    }
+}
+
 fn print_human(snapshot: &VmSnapshot) {
     println!("state: {}", snapshot.state_root);
     if snapshot.vms.is_empty() {
@@ -2038,6 +2184,10 @@ fn print_create(output: &VmCreateOutput) {
     println!("  microvm: {}", output.microvm_config);
     if output.dry_run {
         println!("  dry-run: no files written");
+    } else {
+        println!("  next: argos vm start {}", output.record.id);
+        println!("  tmux: argos vm tmux {}", output.record.id);
+        println!("  show: argos vm show {}", output.record.id);
     }
 }
 
@@ -2088,10 +2238,8 @@ fn print_up(output: &VmUpOutput) {
             serde_json::to_string(workdir).unwrap()
         );
     }
-    println!(
-        "  attach: argos sessions attach vm:{}",
-        output.start.record.id
-    );
+    println!("  tmux: argos vm tmux {}", output.start.record.id);
+    println!("  show: argos vm show {}", output.start.record.id);
     print_links(&output.start.record, "  ");
 }
 
@@ -2176,11 +2324,11 @@ fn print_links(vm: &VmRecord, prefix: &str) {
     if vm.ports.is_empty() {
         return;
     }
-    println!("{prefix}links:");
+    println!("{prefix}ports:");
     for mapping in &vm.ports {
         println!(
-            "{prefix}  {}: http://127.0.0.1:{} -> guest:{}",
-            mapping.name, mapping.host, mapping.guest
+            "{prefix}  {}: guest:{} -> host:http://127.0.0.1:{}",
+            mapping.name, mapping.guest, mapping.host
         );
     }
 }
@@ -2628,6 +2776,32 @@ mod tests {
     fn slugs_names() {
         assert_eq!(slug("Trade Feature!"), "trade-feature");
         assert_eq!(slug("---"), "");
+    }
+
+    #[test]
+    fn derives_task_identity_from_repo() {
+        let root = std::env::temp_dir().join(format!(
+            "argos-task-id-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let repo = root.join("account");
+        fs::create_dir_all(&repo).unwrap();
+        let identity = task_vm_identity("Fix Auth", repo.to_str().unwrap(), None, None).unwrap();
+        assert_eq!(identity.project, "account");
+        assert_eq!(identity.name, "account: Fix Auth");
+        assert_eq!(identity.id, "account-fix-auth");
+        let explicit = task_vm_identity(
+            "Fix Auth",
+            "git@github.com:trbutler4/qvattro.git",
+            Some("qvattro"),
+            Some("custom-id".into()),
+        )
+        .unwrap();
+        assert_eq!(explicit.project, "qvattro");
+        assert_eq!(explicit.name, "qvattro: Fix Auth");
+        assert_eq!(explicit.id, "custom-id");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

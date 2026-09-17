@@ -65,6 +65,11 @@ enum Command {
         #[command(subcommand)]
         command: VmCommand,
     },
+    /// Create task-scoped VM workspaces from repos.
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -250,6 +255,58 @@ enum VmCommand {
         id: String,
         #[arg(long, value_name = "PATH")]
         state_dir: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TaskCommand {
+    /// Create a stopped VM workspace for one repo task.
+    Create {
+        task: String,
+        #[arg(long, value_name = "REPO")]
+        repo: String,
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
+        #[arg(long, value_name = "ID")]
+        id: Option<String>,
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        work_root: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        config: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        profile: Option<std::path::PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create if needed, start, then attach to a task VM workspace.
+    Up {
+        task: String,
+        #[arg(long, value_name = "REPO")]
+        repo: String,
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
+        #[arg(long, value_name = "ID")]
+        id: Option<String>,
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        work_root: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        config: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        profile: Option<std::path::PathBuf>,
+        #[arg(long)]
+        no_attach: bool,
+        #[arg(long)]
+        json: bool,
     },
 }
 #[derive(Clone, Serialize)]
@@ -462,6 +519,58 @@ fn main() -> ExitCode {
                 id,
                 state_dir,
                 tmux: true,
+            }),
+        },
+        Command::Task { command } => match command {
+            TaskCommand::Create {
+                task,
+                repo,
+                project,
+                id,
+                host,
+                state_dir,
+                work_root,
+                config,
+                profile,
+                dry_run,
+                json,
+            } => vm::task_create(vm::TaskCreateOptions {
+                task,
+                repo,
+                project,
+                id,
+                host,
+                state_dir,
+                work_root,
+                config,
+                profile,
+                dry_run,
+                json,
+            }),
+            TaskCommand::Up {
+                task,
+                repo,
+                project,
+                id,
+                host,
+                state_dir,
+                work_root,
+                config,
+                profile,
+                no_attach,
+                json,
+            } => vm::task_up(vm::TaskUpOptions {
+                task,
+                repo,
+                project,
+                id,
+                host,
+                state_dir,
+                work_root,
+                config,
+                profile,
+                no_attach,
+                json,
             }),
         },
     }

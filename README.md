@@ -16,6 +16,7 @@ Implemented:
 - Local and SSH discovery of existing tmux sessions.
 - Attach to host tmux sessions.
 - Create and manage local microVMs.
+- Task-oriented VM creation for parallel repo work.
 - Attach to VM-owned tmux over SSH.
 - A basic TUI over the same session and VM model.
 - Repo profiles through `.argos.toml`.
@@ -128,10 +129,22 @@ Host sessions are unmanaged. Argos lists and attaches to them, but does not own 
 
 ## VMs
 
-Create or enter a VM for a repo:
+Create or enter a task VM for a repo:
 
 ```sh
 cd ~/Projects/my-repo
+argos task create "fix auth" --repo .
+argos task up "fix auth" --repo .
+```
+
+Task commands derive a VM id from the repo name and task name. For example,
+`argos task create "fix auth" --repo ~/Projects/account` creates a VM named
+`account: fix auth` with id `account-fix-auth`. Use `--project` or `--id` when
+you want explicit naming.
+
+Lower-level VM commands are still available:
+
+```sh
 argos vm up "my task" --repo .
 ```
 
@@ -185,6 +198,13 @@ guest = 5173
 ```
 
 Argos installs the listed Nixpkgs package attributes in the guest. It maps each declared guest port to a unique host loopback port, so two VMs can both run an app on guest port `3001`.
+
+`argos vm show <id>` prints the assigned mappings, for example:
+
+```text
+ports:
+  api: guest:3001 -> host:http://127.0.0.1:43000
+```
 
 Argos does not run servers. Start those inside the VM using the repo's own tools.
 
