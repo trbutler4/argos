@@ -155,6 +155,7 @@ Useful VM commands:
 
 ```sh
 argos vm list
+argos vm list --detailed
 argos vm show my-task
 argos vm logs my-task --follow
 argos vm shell my-task
@@ -163,6 +164,9 @@ argos vm stop my-task
 argos vm rm my-task --dry-run
 argos vm rm my-task --force
 ```
+
+`argos vm list` prints one VM id per line. Use `--detailed` for status,
+project, repo, package, port, and path details.
 
 `vm up` creates the VM if missing, starts it if needed, then attaches to guest tmux. Use `--no-attach` to only create/start.
 

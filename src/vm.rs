@@ -327,7 +327,7 @@ pub(crate) fn snapshot(state_dir: Option<PathBuf>) -> Result<VmSnapshot, String>
     load_snapshot(&state_root).map_err(|error| format!("{}: {}", error.code, error.message))
 }
 
-pub(crate) fn list(json: bool, state_dir: Option<PathBuf>) -> ExitCode {
+pub(crate) fn list(json: bool, detailed: bool, state_dir: Option<PathBuf>) -> ExitCode {
     let state_root = match state_root(state_dir) {
         Ok(path) => path,
         Err(error) => {
@@ -345,7 +345,7 @@ pub(crate) fn list(json: bool, state_dir: Option<PathBuf>) -> ExitCode {
     if json {
         println!("{}", serde_json::to_string(&snapshot).unwrap());
     } else {
-        print_human(&snapshot);
+        print_human(&snapshot, detailed);
     }
     ExitCode::SUCCESS
 }
@@ -2178,12 +2178,18 @@ fn project_name_from_repo(repo: &str) -> Option<String> {
     }
 }
 
-fn print_human(snapshot: &VmSnapshot) {
-    println!("state: {}", snapshot.state_root);
+fn print_human(snapshot: &VmSnapshot, detailed: bool) {
     if snapshot.vms.is_empty() {
         println!("no VMs");
         return;
     }
+    if !detailed {
+        for vm in &snapshot.vms {
+            println!("{}", vm.id);
+        }
+        return;
+    }
+    println!("state: {}", snapshot.state_root);
     for vm in &snapshot.vms {
         println!(
             "{} ({}) on {}",

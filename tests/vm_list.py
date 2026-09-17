@@ -69,8 +69,11 @@ def main():
         assert snapshot["vms"][1]["status"] == "running"
         human = run(str(BINARY), "vm", "list", "--state-dir", str(state))
         assert human.returncode == 0, human.stderr
-        assert '"Alpha VM" (stopped) on test-host' in human.stdout
-        assert '"trade"' in human.stdout
+        assert human.stdout.splitlines() == ["alpha", "beta"]
+        detailed = run(str(BINARY), "vm", "list", "--state-dir", str(state), "--detailed")
+        assert detailed.returncode == 0, detailed.stderr
+        assert '"Alpha VM" (stopped) on test-host' in detailed.stdout
+        assert '"trade"' in detailed.stdout
 
         relative = run(str(BINARY), "vm", "list", "--state-dir", "relative", "--json")
         assert relative.returncode == 2

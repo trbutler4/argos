@@ -131,6 +131,8 @@ enum VmCommand {
     List {
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        detailed: bool,
         #[arg(long, value_name = "PATH")]
         state_dir: Option<std::path::PathBuf>,
     },
@@ -391,7 +393,11 @@ fn main() -> ExitCode {
             } => host::hosts_status(json, config, host_filter),
         },
         Command::Vm { command } => match command {
-            VmCommand::List { json, state_dir } => vm::list(json, state_dir),
+            VmCommand::List {
+                json,
+                detailed,
+                state_dir,
+            } => vm::list(json, detailed, state_dir),
             VmCommand::Create {
                 name,
                 id,
