@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -20,6 +20,8 @@ pub struct Config {
 pub struct VmConfig {
     #[serde(default)]
     pub guest_tmux: Option<GuestTmuxConfig>,
+    #[serde(default)]
+    pub defaults: Option<VmDefaultsConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +31,40 @@ pub struct GuestTmuxConfig {
     pub config_text: Option<String>,
     #[serde(default)]
     pub config_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VmDefaultsConfig {
+    #[serde(default)]
+    pub packages: Vec<String>,
+    #[serde(default)]
+    pub files: Vec<VmDefaultFileConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VmDefaultFileConfig {
+    pub target: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub source_path: Option<PathBuf>,
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VmDefaults {
+    pub packages: Vec<String>,
+    pub files: Vec<VmDefaultFile>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VmDefaultFile {
+    pub target: String,
+    pub text: String,
+    pub mode: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +165,55 @@ pub fn guest_tmux_config(path: Option<&Path>) -> Result<Option<String>, String> 
     }
 }
 
+pub fn vm_defaults(path: Option<&Path>) -> Result<VmDefaults, String> {
+    let Some((config, config_path)) = load_selected(path)? else {
+        return Ok(VmDefaults::default());
+    };
+    let Some(vm) = config.vm.as_ref() else {
+        return Ok(VmDefaults::default());
+    };
+    let Some(defaults) = vm.defaults.as_ref() else {
+        return Ok(VmDefaults::default());
+    };
+
+    let mut files = Vec::new();
+    for file in &defaults.files {
+        let text = match (&file.text, &file.source_path) {
+            (Some(_), Some(_)) => {
+                return Err("vm.defaults.files cannot set both text and source_path".into());
+            }
+            (Some(text), None) => text.clone(),
+            (None, Some(path)) => {
+                let path = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    config_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(path)
+                };
+                fs::read_to_string(&path).map_err(|error| {
+                    format!(
+                        "cannot read vm.defaults.files.source_path {}: {error}",
+                        path.display()
+                    )
+                })?
+            }
+            (None, None) => String::new(),
+        };
+        files.push(VmDefaultFile {
+            target: file.target.clone(),
+            text,
+            mode: file.mode.clone().unwrap_or_else(|| "0644".into()),
+        });
+    }
+
+    Ok(VmDefaults {
+        packages: defaults.packages.clone(),
+        files,
+    })
+}
+
 fn parse(text: &str, path: &Path) -> Result<Config, String> {
     let config: Config =
         toml::from_str(text).map_err(|e| format!("invalid config {}: {e}", path.display()))?;
@@ -164,23 +249,63 @@ pub fn validate(config: &Config) -> Result<(), String> {
     if local.ssh_alias.is_some() {
         return Err("client.machine_id must be local and cannot have ssh_alias".into());
     }
-    if let Some(vm) = &config.vm
-        && let Some(tmux) = &vm.guest_tmux
-    {
-        if tmux.config_text.is_some() && tmux.config_path.is_some() {
-            return Err("vm.guest_tmux cannot set both config_text and config_path".into());
-        }
-        if let Some(text) = &tmux.config_text
-            && text.contains('\0')
-        {
-            return Err("vm.guest_tmux.config_text cannot contain NUL bytes".into());
-        }
-        if let Some(path) = &tmux.config_path {
-            if path.as_os_str().is_empty() {
-                return Err("vm.guest_tmux.config_path cannot be empty".into());
+    if let Some(vm) = &config.vm {
+        if let Some(tmux) = &vm.guest_tmux {
+            if tmux.config_text.is_some() && tmux.config_path.is_some() {
+                return Err("vm.guest_tmux cannot set both config_text and config_path".into());
             }
-            if path.to_string_lossy().chars().any(|c| c == '\0') {
-                return Err("vm.guest_tmux.config_path cannot contain NUL bytes".into());
+            if let Some(text) = &tmux.config_text
+                && text.contains('\0')
+            {
+                return Err("vm.guest_tmux.config_text cannot contain NUL bytes".into());
+            }
+            if let Some(path) = &tmux.config_path {
+                if path.as_os_str().is_empty() {
+                    return Err("vm.guest_tmux.config_path cannot be empty".into());
+                }
+                if path.to_string_lossy().chars().any(|c| c == '\0') {
+                    return Err("vm.guest_tmux.config_path cannot contain NUL bytes".into());
+                }
+            }
+        }
+        if let Some(defaults) = &vm.defaults {
+            let mut packages = BTreeSet::new();
+            for package in &defaults.packages {
+                if !valid_package_attr(package) || !packages.insert(package) {
+                    return Err(format!(
+                        "vm.defaults.packages contains invalid or duplicate attr {package:?}"
+                    ));
+                }
+            }
+            let mut targets = BTreeSet::new();
+            for file in &defaults.files {
+                if !valid_guest_file_target(&file.target) || !targets.insert(file.target.as_str()) {
+                    return Err(format!(
+                        "vm.defaults.files contains invalid or duplicate target {:?}",
+                        file.target
+                    ));
+                }
+                if file.text.is_some() && file.source_path.is_some() {
+                    return Err("vm.defaults.files cannot set both text and source_path".into());
+                }
+                if let Some(text) = &file.text
+                    && text.contains('\0')
+                {
+                    return Err("vm.defaults.files.text cannot contain NUL bytes".into());
+                }
+                if let Some(path) = &file.source_path {
+                    if path.as_os_str().is_empty() {
+                        return Err("vm.defaults.files.source_path cannot be empty".into());
+                    }
+                    if path.to_string_lossy().chars().any(|c| c == '\0') {
+                        return Err("vm.defaults.files.source_path cannot contain NUL bytes".into());
+                    }
+                }
+                if let Some(mode) = &file.mode
+                    && !valid_file_mode(mode)
+                {
+                    return Err("vm.defaults.files.mode must be a 3 or 4 digit octal mode".into());
+                }
             }
         }
     }
@@ -213,6 +338,28 @@ pub fn validate(config: &Config) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn valid_package_attr(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && !value.starts_with('.')
+        && !value.ends_with('.')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+}
+
+fn valid_guest_file_target(value: &str) -> bool {
+    value.starts_with('/')
+        && value.len() <= 4096
+        && !value.contains('\0')
+        && !value.chars().any(char::is_control)
+        && !value.split('/').any(|part| part == "..")
+}
+
+fn valid_file_mode(value: &str) -> bool {
+    (value.len() == 3 || value.len() == 4) && value.bytes().all(|b| (b'0'..=b'7').contains(&b))
 }
 
 fn valid_id(value: &str) -> bool {
@@ -252,5 +399,23 @@ mod tests {
     #[test]
     fn socket_controls_rejected() {
         assert!(parse("schema_version=1\n[client]\nmachine_id='local'\n[machines.local]\nsocket=\"a\\u0000\"\n").is_err());
+    }
+
+    #[test]
+    fn validates_vm_defaults() {
+        let c = parse(
+            "schema_version=1\n[client]\nmachine_id='local'\n[machines.local]\n[vm.defaults]\npackages=['ripgrep']\n[[vm.defaults.files]]\ntarget='/root/.config/example'\ntext='hello'\nmode='0600'\n",
+        )
+        .unwrap();
+        let defaults = c.vm.unwrap().defaults.unwrap();
+        assert_eq!(defaults.packages, vec!["ripgrep"]);
+        assert_eq!(defaults.files[0].target, "/root/.config/example");
+    }
+
+    #[test]
+    fn rejects_bad_vm_defaults() {
+        assert!(parse("schema_version=1\n[client]\nmachine_id='local'\n[machines.local]\n[vm.defaults]\npackages=['../bad']\n").is_err());
+        assert!(parse("schema_version=1\n[client]\nmachine_id='local'\n[machines.local]\n[[vm.defaults.files]]\ntarget='relative'\ntext='x'\n").is_err());
+        assert!(parse("schema_version=1\n[client]\nmachine_id='local'\n[machines.local]\n[[vm.defaults.files]]\ntarget='/root/x'\ntext='x'\nmode='bad'\n").is_err());
     }
 }

@@ -137,6 +137,8 @@ struct VmCreateOutput {
     pub(crate) repo_path: Option<String>,
     microvm_config: String,
     record: VmRecord,
+    #[serde(skip_serializing)]
+    vm_defaults: config::VmDefaults,
 }
 
 #[derive(Debug, Serialize)]
@@ -632,6 +634,7 @@ pub(crate) fn guest_command(options: GuestCommandOptions) -> ExitCode {
 }
 
 fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
+    let vm_defaults = load_vm_defaults(options.config.as_deref())?;
     let state_root = state_root(options.state_dir.clone())?;
     let id = match &options.id {
         Some(id) => id.clone(),
@@ -673,7 +676,7 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
     let repo_path = clone_repo.as_ref().map(|_| workdir.join("repo"));
     let profile = load_repo_profile(options.profile.as_deref(), options.repo.as_deref())?;
     let guest_workdir = profile.profile.workspace.workdir.clone();
-    let packages = profile.profile.vm.packages.clone();
+    let packages = packages_with_defaults(&profile.profile, &vm_defaults);
     let ports = allocate_port_mappings(&profile.profile, &state_root)?;
     let ssh_port = ssh_port_for_id(&id);
     let record = VmRecord {
@@ -715,6 +718,7 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
         repo_path: repo_path.map(|path| path.display().to_string()),
         microvm_config: microvm_config.display().to_string(),
         record,
+        vm_defaults,
     })
 }
 
@@ -743,6 +747,7 @@ fn update_vm(options: UpdateOptions) -> Result<VmUpdateOutput, VmError> {
         ));
     }
     let tmux_config = load_guest_tmux_config(options.config.as_deref())?;
+    let vm_defaults = load_vm_defaults(options.config.as_deref())?;
     let state_root = state_root(options.state_dir)?;
     let state_file = state_root.join("vms").join(format!("{}.json", options.id));
     let mut record = load_record(&state_file)?;
@@ -762,7 +767,7 @@ fn update_vm(options: UpdateOptions) -> Result<VmUpdateOutput, VmError> {
         .as_ref()
         .map(|path| path.display().to_string());
     record.guest_workdir = Some(loaded_profile.profile.workspace.workdir.clone());
-    record.packages = loaded_profile.profile.vm.packages.clone();
+    record.packages = packages_with_defaults(&loaded_profile.profile, &vm_defaults);
     record.ports =
         allocate_update_port_mappings(&loaded_profile.profile, &state_root, &previous_record)?;
     record.updated_at_unix_ms = Some(now_ms());
@@ -794,7 +799,7 @@ fn update_vm(options: UpdateOptions) -> Result<VmUpdateOutput, VmError> {
         write_guest_tmux_config(&instance_dir, tmux_config.as_deref())?;
         fs::write(
             &microvm_config,
-            render_microvm_config(&record, tmux_config.as_deref()),
+            render_microvm_config(&record, tmux_config.as_deref(), &vm_defaults.files),
         )
         .map_err(|error| {
             state_error(format!(
@@ -924,7 +929,7 @@ fn create_vm_state(output: &mut VmCreateOutput, tmux_config: Option<&str>) -> Re
     write_guest_tmux_config(&instance_dir, tmux_config)?;
     fs::write(
         &output.microvm_config,
-        render_microvm_config(&output.record, tmux_config),
+        render_microvm_config(&output.record, tmux_config, &output.vm_defaults.files),
     )
     .map_err(|error| {
         state_error(format!(
@@ -1022,6 +1027,7 @@ fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
         ));
     }
     let tmux_config = load_guest_tmux_config(options.config.as_deref())?;
+    let vm_defaults = load_vm_defaults(options.config.as_deref())?;
     let state_root = state_root(options.state_dir)?;
     let state_file = state_root.join("vms").join(format!("{}.json", options.id));
     let mut record = load_record(&state_file)?;
@@ -1095,7 +1101,7 @@ fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
     write_guest_tmux_config(&instance_dir, tmux_config.as_deref())?;
     fs::write(
         &microvm_config,
-        render_microvm_config(&record, tmux_config.as_deref()),
+        render_microvm_config(&record, tmux_config.as_deref(), &vm_defaults.files),
     )
     .map_err(|error| {
         state_error(format!(
@@ -1387,6 +1393,24 @@ struct LoadedProfile {
 
 fn default_guest_workdir() -> String {
     "/workspace/repo".into()
+}
+
+fn load_vm_defaults(path: Option<&Path>) -> Result<config::VmDefaults, VmError> {
+    config::vm_defaults(path).map_err(|message| VmError {
+        code: "config_error",
+        message,
+    })
+}
+
+fn packages_with_defaults(profile: &RepoProfile, defaults: &config::VmDefaults) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut packages = Vec::new();
+    for package in defaults.packages.iter().chain(profile.vm.packages.iter()) {
+        if seen.insert(package.as_str()) {
+            packages.push(package.clone());
+        }
+    }
+    packages
 }
 
 fn load_repo_profile(
@@ -2526,13 +2550,18 @@ fn render_instance_flake() -> String {
     )
 }
 
-fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String {
+fn render_microvm_config(
+    record: &VmRecord,
+    tmux_config: Option<&str>,
+    default_files: &[config::VmDefaultFile],
+) -> String {
     let ssh_port = record
         .ssh_port
         .unwrap_or_else(|| ssh_port_for_id(&record.id));
     let keys = authorized_keys_nix();
     let mac = mac_for_id(&record.id);
     let tmux_block = render_tmux_config_block(tmux_config);
+    let default_files_block = render_default_files_block(default_files);
     let tmux_store_shares = render_tmux_store_shares(tmux_config);
     let host_git_shares = render_host_git_shares();
     let git_config = render_git_config_text();
@@ -2566,6 +2595,7 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
   environment.etc."gitconfig".text = {git_config};
   systemd.tmpfiles.rules = [ "d /var/lib/argos/ssh 0700 root root -" ];
 {tmux_block}
+{default_files_block}
 {workspace_virtiofsd}
   systemd.services.argos-ready = {{
     description = "Argos VM readiness marker";
@@ -2614,6 +2644,7 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
         mac = serde_json::to_string(&mac).unwrap(),
         ssh_port = ssh_port,
         tmux_block = tmux_block,
+        default_files_block = default_files_block,
         git_config = git_config,
         workspace_virtiofsd = workspace_virtiofsd,
         tmux_store_shares = tmux_store_shares,
@@ -2622,6 +2653,27 @@ fn render_microvm_config(record: &VmRecord, tmux_config: Option<&str>) -> String
         packages = packages,
         firewall_ports = firewall_ports,
         app_forwards = app_forwards,
+    )
+}
+
+fn render_default_files_block(files: &[config::VmDefaultFile]) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let mut script = String::new();
+    for (index, file) in files.iter().enumerate() {
+        let name = serde_json::to_string(&format!("argos-global-file-{index}")).unwrap();
+        let text = serde_json::to_string(&file.text).unwrap();
+        script.push_str(&format!(
+            "    install -D -m {} ${{builtins.toFile {name} {text}}} {}\n",
+            file.mode,
+            shell_quote(&file.target)
+        ));
+    }
+    format!(
+        r#"  system.activationScripts.argosGlobalFiles.text = ''
+{script}  '';
+"#,
     )
 }
 

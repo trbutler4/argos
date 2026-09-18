@@ -32,7 +32,7 @@ def record(vm_id, **overrides):
     return value
 
 
-def config_text(tmux_section):
+def config_text(tmux_section, extra=""):
     return f'''schema_version = 1
 [client]
 machine_id = "local"
@@ -41,6 +41,7 @@ machine_id = "local"
 
 [vm.guest_tmux]
 {tmux_section}
+{extra}
 '''
 
 
@@ -82,8 +83,19 @@ def main():
         work_root = root / "work-root"
         tmux_conf = root / "guest.tmux.conf"
         tmux_conf.write_text("set -g status-left 'argos-vm-test'\n")
+        global_file = root / "global.txt"
+        global_file.write_text("hello from global argos config\n")
+        vm_defaults = f'''
+[vm.defaults]
+packages = ["ripgrep", "jq"]
+
+[[vm.defaults.files]]
+target = "/root/.config/argos/global.txt"
+source_path = "{global_file.name}"
+mode = "0600"
+'''
         argos_config = root / "argos.toml"
-        argos_config.write_text(config_text(f'config_path = "{tmux_conf}"'))
+        argos_config.write_text(config_text(f'config_path = "{tmux_conf}"', vm_defaults))
         inline_config = root / "argos-inline.toml"
         inline_config.write_text(config_text('config_text = "set -g status-right inline"'))
         bad_tmux_config = root / "argos-bad-tmux.toml"
@@ -152,7 +164,10 @@ guest = 5173
         assert 'tag = "workspace";' in microvm_text
         assert 'socket = ' in microvm_text and 'workspace-virtiofs.sock' in microvm_text
         assert f'source = "{work_root}/trade-feature"' in microvm_text
-        assert 'environment.systemPackages = with pkgs; [ git tmux openssh go just ];' in microvm_text
+        assert 'environment.systemPackages = with pkgs; [ git tmux openssh ripgrep jq go just ];' in microvm_text
+        assert 'system.activationScripts.argosGlobalFiles.text' in microvm_text
+        assert 'install -D -m 0600 ${builtins.toFile "argos-global-file-0" "hello from global argos config\\n"} '\
+            "'/root/.config/argos/global.txt'" in microvm_text
         assert 'networking.firewall.allowedTCPPorts = [ 22 3001 5173 ];' in microvm_text
         assert 'guest.port = 3001;' in microvm_text
         assert 'guest.port = 5173;' in microvm_text
@@ -161,7 +176,7 @@ guest = 5173
         assert value["record"]["source_repo"] == str(source)
         assert value["record"]["profile_path"] == str(profile)
         assert value["record"]["guest_workdir"] == "/workspace/repo"
-        assert value["record"]["packages"] == ["go", "just"]
+        assert value["record"]["packages"] == ["ripgrep", "jq", "go", "just"]
         assert [port["name"] for port in value["record"]["ports"]] == ["api", "web"]
         assert [port["guest"] for port in value["record"]["ports"]] == [3001, 5173]
         assert len({port["host"] for port in value["record"]["ports"]}) == 2
@@ -191,29 +206,29 @@ guest = 3001
 name = "admin"
 guest = 9090
 ''')
-        dry_update = run(str(BINARY), "vm", "update", "trade-feature", "--state-dir", str(create_state), "--dry-run", "--json", env=home_env)
+        dry_update = run(str(BINARY), "vm", "update", "trade-feature", "--state-dir", str(create_state), "--config", str(argos_config), "--dry-run", "--json", env=home_env)
         assert dry_update.returncode == 0, dry_update.stderr
         dry_update_value = json.loads(dry_update.stdout)
         assert dry_update_value["dry_run"] is True
         assert dry_update_value["profile_source"] == str(repo_profile)
-        assert dry_update_value["record"]["packages"] == ["jq"]
-        assert json.loads((create_state / "vms" / "trade-feature.json").read_text())["packages"] == ["go", "just"]
-        updated = run(str(BINARY), "vm", "update", "trade-feature", "--state-dir", str(create_state), "--json", env=home_env)
+        assert dry_update_value["record"]["packages"] == ["ripgrep", "jq"]
+        assert json.loads((create_state / "vms" / "trade-feature.json").read_text())["packages"] == ["ripgrep", "jq", "go", "just"]
+        updated = run(str(BINARY), "vm", "update", "trade-feature", "--state-dir", str(create_state), "--config", str(argos_config), "--json", env=home_env)
         assert updated.returncode == 0, updated.stderr
         updated_value = json.loads(updated.stdout)
         assert updated_value["dry_run"] is False
         assert updated_value["profile_source"] == str(repo_profile)
         assert updated_value["record"]["profile_path"] == str(repo_profile)
-        assert updated_value["record"]["packages"] == ["jq"]
+        assert updated_value["record"]["packages"] == ["ripgrep", "jq"]
         assert [port["name"] for port in updated_value["record"]["ports"]] == ["api", "admin"]
         assert next(port["host"] for port in updated_value["record"]["ports"] if port["name"] == "api") == api_host
         assert next(port["host"] for port in updated_value["record"]["ports"] if port["name"] == "admin") != api_host
         microvm_text = Path(value["microvm_config"]).read_text()
-        assert 'environment.systemPackages = with pkgs; [ git tmux openssh jq ];' in microvm_text
+        assert 'environment.systemPackages = with pkgs; [ git tmux openssh ripgrep jq ];' in microvm_text
         assert 'guest.port = 9090;' in microvm_text and 'guest.port = 5173;' not in microvm_text
         listed = json.loads(run(str(BINARY), "vm", "list", "--state-dir", str(create_state), "--json").stdout)
         assert [vm["id"] for vm in listed["vms"]] == ["trade-feature"]
-        assert listed["vms"][0]["status"] == "created" and listed["vms"][0]["packages"] == ["jq"]
+        assert listed["vms"][0]["status"] == "created" and listed["vms"][0]["packages"] == ["ripgrep", "jq"]
         show_json = run(str(BINARY), "vm", "show", "trade-feature", "--state-dir", str(create_state), "--json")
         assert show_json.returncode == 0, show_json.stderr
         shown = json.loads(show_json.stdout)

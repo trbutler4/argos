@@ -91,6 +91,20 @@ config_path = "/absolute/path/to/tmux.conf"
 # config_text = """
 # set -g mouse on
 # """
+
+[vm.defaults]
+# Installed in every VM created with this Argos config. These are Nixpkgs attrs.
+packages = ["ripgrep", "jq", "zsh"]
+
+[[vm.defaults.files]]
+# Non-secret file copied into every VM at activation time.
+target = "/root/.config/example"
+source_path = "/absolute/path/to/example"
+mode = "0644"
+
+[[vm.defaults.files]]
+target = "/root/.config/inline-example"
+text = "inline file contents\n"
 ```
 
 `--config` always means Argos config. Commands only read the sections they need.
@@ -206,6 +220,8 @@ guest = 5173
 ```
 
 Argos installs the listed Nixpkgs package attributes in the guest. It maps each declared guest port to a unique host loopback port, so two VMs can both run an app on guest port `3001`.
+
+Global `[vm.defaults]` packages from the Argos config are installed before repo packages, with duplicates removed. Global `[[vm.defaults.files]]` entries are intended for non-secret dotfiles and small helper config. Relative `source_path` values are resolved relative to the Argos config file.
 
 `argos vm show <id>` prints the assigned mappings, for example:
 
