@@ -160,6 +160,7 @@ argos vm show my-task
 argos vm logs my-task --follow
 argos vm shell my-task
 argos vm tmux my-task
+argos vm restart my-task
 argos vm stop my-task
 argos vm rm my-task --dry-run
 argos vm rm my-task --force

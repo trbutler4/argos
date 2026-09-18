@@ -234,6 +234,16 @@ enum VmCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Stop then start a local VM by id.
+    Restart {
+        id: String,
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        config: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Stop and remove a local VM's record, instance data, and work directory.
     Rm {
         id: String,
@@ -501,6 +511,17 @@ fn main() -> ExitCode {
             } => vm::stop(vm::StopOptions {
                 id,
                 state_dir,
+                json,
+            }),
+            VmCommand::Restart {
+                id,
+                state_dir,
+                config,
+                json,
+            } => vm::restart(vm::RestartOptions {
+                id,
+                state_dir,
+                config,
                 json,
             }),
             VmCommand::Rm {

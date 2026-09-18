@@ -186,6 +186,13 @@ struct VmStopOutput {
 }
 
 #[derive(Debug, Serialize)]
+struct VmRestartOutput {
+    schema_version: u32,
+    stop: VmStopOutput,
+    start: VmStartOutput,
+}
+
+#[derive(Debug, Serialize)]
 struct VmRemoveOutput {
     schema_version: u32,
     state_root: String,
@@ -305,6 +312,13 @@ pub(crate) struct UpOptions {
 pub(crate) struct StopOptions {
     pub(crate) id: String,
     pub(crate) state_dir: Option<PathBuf>,
+    pub(crate) json: bool,
+}
+
+pub(crate) struct RestartOptions {
+    pub(crate) id: String,
+    pub(crate) state_dir: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
     pub(crate) json: bool,
 }
 
@@ -566,6 +580,24 @@ pub(crate) fn stop(options: StopOptions) -> ExitCode {
         println!("{}", serde_json::to_string(&output).unwrap());
     } else {
         print_stop(&output);
+    }
+    ExitCode::SUCCESS
+}
+
+pub(crate) fn restart(options: RestartOptions) -> ExitCode {
+    let json = options.json;
+    let output = match restart_vm(options) {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("error: {}: {}", error.code, error.message);
+            let code = if error.code == "invalid_args" { 2 } else { 1 };
+            return ExitCode::from(code);
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string(&output).unwrap());
+    } else {
+        print_restart(&output);
     }
     ExitCode::SUCCESS
 }
@@ -1163,6 +1195,28 @@ fn stop_vm(options: StopOptions) -> Result<VmStopOutput, VmError> {
         pid,
         already_stopped,
         record,
+    })
+}
+
+fn restart_vm(options: RestartOptions) -> Result<VmRestartOutput, VmError> {
+    let id = options.id;
+    let state_dir = options.state_dir;
+    let config = options.config;
+    let stop = stop_vm(StopOptions {
+        id: id.clone(),
+        state_dir: state_dir.clone(),
+        json: false,
+    })?;
+    let start = start_vm(StartOptions {
+        id,
+        state_dir,
+        config,
+        json: false,
+    })?;
+    Ok(VmRestartOutput {
+        schema_version: 1,
+        stop,
+        start,
     })
 }
 
@@ -2398,6 +2452,25 @@ fn print_stop(output: &VmStopOutput) {
     if let Some(pid) = output.pid {
         println!("  previous pid: {pid}");
     }
+}
+
+fn print_restart(output: &VmRestartOutput) {
+    println!(
+        "restarted {}",
+        serde_json::to_string(&output.start.record.name).unwrap()
+    );
+    println!("  id: {}", output.start.record.id);
+    if output.stop.already_stopped {
+        println!("  stopped: already stopped");
+    } else if let Some(pid) = output.stop.pid {
+        println!("  stopped previous pid: {pid}");
+    } else {
+        println!("  stopped previous VM");
+    }
+    println!("  pid: {}", output.start.pid);
+    println!("  log: {}", output.start.log_path);
+    println!("  tmux: argos vm tmux {}", output.start.record.id);
+    print_links(&output.start.record, "  ");
 }
 
 fn print_remove(output: &VmRemoveOutput) {

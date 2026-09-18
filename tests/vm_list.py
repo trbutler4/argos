@@ -287,6 +287,16 @@ out.symlink_to(runner)
         again = run(str(BINARY), "vm", "start", "trade-feature", "--state-dir", str(create_state), "--config", str(inline_config), "--json", env=fake_env)
         assert again.returncode == 0, again.stderr
         assert json.loads(again.stdout)["already_running"] is True
+        restarted = run(str(BINARY), "vm", "restart", "trade-feature", "--state-dir", str(create_state), "--config", str(inline_config), "--json", env=fake_env)
+        assert restarted.returncode == 0, restarted.stderr
+        restart_value = json.loads(restarted.stdout)
+        assert restart_value["stop"]["already_stopped"] is False
+        assert restart_value["start"]["already_running"] is False
+        assert restart_value["start"]["record"]["status"] == "running"
+        assert run("tmux", "has-session", "-t", "argos-vm-trade-feature").returncode == 0
+        restart_human = run(str(BINARY), "vm", "restart", "trade-feature", "--state-dir", str(create_state), "--config", str(inline_config), env=fake_env)
+        assert restart_human.returncode == 0, restart_human.stderr
+        assert "restarted" in restart_human.stdout and "tmux: argos vm tmux trade-feature" in restart_human.stdout
         up_existing = run(str(BINARY), "vm", "up", "Trade Feature", "--state-dir", str(create_state), "--config", str(inline_config), "--json", env=fake_env)
         assert up_existing.returncode == 0, up_existing.stderr
         up_existing_value = json.loads(up_existing.stdout)
