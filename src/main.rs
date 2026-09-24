@@ -1,4 +1,6 @@
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueHint};
+use clap_complete::CompleteEnv;
+use clap_complete::engine::ArgValueCandidates;
 use serde::Serialize;
 use std::{
     process::ExitCode,
@@ -6,6 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+mod completions;
 mod config;
 mod host;
 mod sessions;
@@ -25,11 +28,14 @@ enum Command {
     List {
         #[arg(long)]
         json: bool,
-        #[arg(long, value_name="PATH", conflicts_with_all=["config", "host", "local"])]
+        #[arg(long, value_name="PATH", conflicts_with_all=["config", "host", "local"],
+              value_hint = ValueHint::FilePath)]
         socket: Option<String>,
-        #[arg(long, value_name="PATH", conflicts_with_all=["socket", "local"])]
+        #[arg(long, value_name="PATH", conflicts_with_all=["socket", "local"],
+              value_hint = ValueHint::FilePath)]
         config: Option<std::path::PathBuf>,
-        #[arg(long, value_name="ID", conflicts_with_all=["socket", "local"])]
+        #[arg(long, value_name="ID", conflicts_with_all=["socket", "local"],
+              add = ArgValueCandidates::new(completions::hosts))]
         host: Option<String>,
         #[arg(long, conflicts_with_all=["socket", "config", "host"])]
         local: bool,
@@ -41,11 +47,14 @@ enum Command {
     },
     /// Open the interactive terminal UI.
     Tui {
-        #[arg(long, value_name="PATH", conflicts_with_all=["config", "host", "local"])]
+        #[arg(long, value_name="PATH", conflicts_with_all=["config", "host", "local"],
+              value_hint = ValueHint::FilePath)]
         socket: Option<String>,
-        #[arg(long, value_name="PATH", conflicts_with_all=["socket", "local"])]
+        #[arg(long, value_name="PATH", conflicts_with_all=["socket", "local"],
+              value_hint = ValueHint::FilePath)]
         config: Option<std::path::PathBuf>,
-        #[arg(long, value_name="ID", conflicts_with_all=["socket", "local"])]
+        #[arg(long, value_name="ID", conflicts_with_all=["socket", "local"],
+              add = ArgValueCandidates::new(completions::hosts))]
         host: Option<String>,
         #[arg(long, conflicts_with_all=["socket", "config", "host"])]
         local: bool,
@@ -78,27 +87,34 @@ enum SessionsCommand {
     List {
         #[arg(long)]
         json: bool,
-        #[arg(long, value_name="PATH", conflicts_with_all=["config", "host", "local"])]
+        #[arg(long, value_name="PATH", conflicts_with_all=["config", "host", "local"],
+              value_hint = ValueHint::FilePath)]
         socket: Option<String>,
-        #[arg(long, value_name="PATH", conflicts_with_all=["socket", "local"])]
+        #[arg(long, value_name="PATH", conflicts_with_all=["socket", "local"],
+              value_hint = ValueHint::FilePath)]
         config: Option<std::path::PathBuf>,
-        #[arg(long, value_name="ID", conflicts_with_all=["socket", "local"])]
+        #[arg(long, value_name="ID", conflicts_with_all=["socket", "local"],
+              add = ArgValueCandidates::new(completions::hosts))]
         host: Option<String>,
         #[arg(long, conflicts_with_all=["socket", "config", "host"])]
         local: bool,
     },
     /// Attach to a host tmux session or VM session.
     Attach {
+        #[arg(add = ArgValueCandidates::new(completions::attach_targets))]
         target: String,
-        #[arg(long, value_name="PATH", conflicts_with_all=["config", "host", "local"])]
+        #[arg(long, value_name="PATH", conflicts_with_all=["config", "host", "local"],
+              value_hint = ValueHint::FilePath)]
         socket: Option<String>,
-        #[arg(long, value_name="PATH", conflicts_with_all=["socket", "local"])]
+        #[arg(long, value_name="PATH", conflicts_with_all=["socket", "local"],
+              value_hint = ValueHint::FilePath)]
         config: Option<std::path::PathBuf>,
-        #[arg(long, value_name="ID", conflicts_with_all=["socket", "local"])]
+        #[arg(long, value_name="ID", conflicts_with_all=["socket", "local"],
+              add = ArgValueCandidates::new(completions::hosts))]
         host: Option<String>,
         #[arg(long, conflicts_with_all=["socket", "config", "host"])]
         local: bool,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         state_dir: Option<std::path::PathBuf>,
     },
 }
@@ -118,9 +134,9 @@ enum HostsCommand {
     Status {
         #[arg(long)]
         json: bool,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
         config: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "ID")]
+        #[arg(long, value_name = "ID", add = ArgValueCandidates::new(completions::hosts))]
         host: Option<String>,
     },
 }
@@ -133,7 +149,7 @@ enum VmCommand {
         json: bool,
         #[arg(long)]
         detailed: bool,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         state_dir: Option<std::path::PathBuf>,
     },
     /// Create a local VM record, work directory, optional repo clone, and microVM config.
@@ -145,15 +161,15 @@ enum VmCommand {
         repo: Option<String>,
         #[arg(long, value_name = "NAME")]
         project: Option<String>,
-        #[arg(long, value_name = "HOST")]
+        #[arg(long, value_name = "HOST", add = ArgValueCandidates::new(completions::hosts))]
         host: Option<String>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         state_dir: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         work_root: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
         config: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
         profile: Option<std::path::PathBuf>,
         #[arg(long)]
         dry_run: bool,
@@ -169,15 +185,15 @@ enum VmCommand {
         repo: Option<String>,
         #[arg(long, value_name = "NAME")]
         project: Option<String>,
-        #[arg(long, value_name = "HOST")]
+        #[arg(long, value_name = "HOST", add = ArgValueCandidates::new(completions::hosts))]
         host: Option<String>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         state_dir: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         work_root: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
         config: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
         profile: Option<std::path::PathBuf>,
         #[arg(long)]
         no_attach: bool,
@@ -186,20 +202,22 @@ enum VmCommand {
     },
     /// Show one VM record, including workspace and exposed links.
     Show {
+        #[arg(add = ArgValueCandidates::new(completions::vm_ids))]
         id: String,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         state_dir: Option<std::path::PathBuf>,
         #[arg(long)]
         json: bool,
     },
     /// Reapply this VM's repo profile or an explicit .argos.toml profile.
     Update {
+        #[arg(add = ArgValueCandidates::new(completions::vm_ids))]
         id: String,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         state_dir: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
         config: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
         profile: Option<std::path::PathBuf>,
         #[arg(long)]
         dry_run: bool,
@@ -208,18 +226,20 @@ enum VmCommand {
     },
     /// Build and start a local VM by id.
     Start {
+        #[arg(add = ArgValueCandidates::new(completions::vm_ids))]
         id: String,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         state_dir: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
         config: Option<std::path::PathBuf>,
         #[arg(long)]
         json: bool,
     },
     /// Print or follow a local VM's console log.
     Logs {
+        #[arg(add = ArgValueCandidates::new(completions::vm_ids))]
         id: String,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         state_dir: Option<std::path::PathBuf>,
         #[arg(long, default_value_t = 200)]
         lines: usize,
@@ -228,26 +248,29 @@ enum VmCommand {
     },
     /// Stop a local VM by id.
     Stop {
+        #[arg(add = ArgValueCandidates::new(completions::vm_ids))]
         id: String,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         state_dir: Option<std::path::PathBuf>,
         #[arg(long)]
         json: bool,
     },
     /// Stop then start a local VM by id.
     Restart {
+        #[arg(add = ArgValueCandidates::new(completions::vm_ids))]
         id: String,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         state_dir: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
         config: Option<std::path::PathBuf>,
         #[arg(long)]
         json: bool,
     },
     /// Stop and remove a local VM's record, instance data, and work directory.
     Rm {
+        #[arg(add = ArgValueCandidates::new(completions::vm_ids))]
         id: String,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         state_dir: Option<std::path::PathBuf>,
         #[arg(long)]
         force: bool,
@@ -258,14 +281,16 @@ enum VmCommand {
     },
     /// SSH into a local VM guest shell.
     Shell {
+        #[arg(add = ArgValueCandidates::new(completions::vm_ids))]
         id: String,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         state_dir: Option<std::path::PathBuf>,
     },
     /// SSH into a local VM guest and join its tmux session.
     Tmux {
+        #[arg(add = ArgValueCandidates::new(completions::vm_ids))]
         id: String,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         state_dir: Option<std::path::PathBuf>,
     },
 }
@@ -281,15 +306,15 @@ enum TaskCommand {
         project: Option<String>,
         #[arg(long, value_name = "ID")]
         id: Option<String>,
-        #[arg(long, value_name = "HOST")]
+        #[arg(long, value_name = "HOST", add = ArgValueCandidates::new(completions::hosts))]
         host: Option<String>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         state_dir: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         work_root: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
         config: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
         profile: Option<std::path::PathBuf>,
         #[arg(long)]
         dry_run: bool,
@@ -305,15 +330,15 @@ enum TaskCommand {
         project: Option<String>,
         #[arg(long, value_name = "ID")]
         id: Option<String>,
-        #[arg(long, value_name = "HOST")]
+        #[arg(long, value_name = "HOST", add = ArgValueCandidates::new(completions::hosts))]
         host: Option<String>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         state_dir: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         work_root: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
         config: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
         profile: Option<std::path::PathBuf>,
         #[arg(long)]
         no_attach: bool,
@@ -347,6 +372,9 @@ pub(crate) struct SnapshotRequest {
 }
 
 fn main() -> ExitCode {
+    // Must run before parsing: when the shell invokes the completer this exits
+    // early and never reaches normal command dispatch.
+    CompleteEnv::with_factory(Cli::command).complete();
     let cli = Cli::parse();
     let Some(command) = cli.command else {
         let mut c = Cli::command();

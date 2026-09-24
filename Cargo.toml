@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+clap_complete = { version = "4.6.11", features = ["unstable-dynamic"] }
 crossterm = "0.28"
 ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }

@@ -281,6 +281,35 @@ Keys:
 - `Enter`: attach to the selected host session or VM session.
 - `q`: quit.
 
+## Shell completion
+
+Completion is dynamic: the shell asks the `argos` binary for candidates on each
+Tab, so suggestions always match the installed version.
+
+The Nix package installs zsh, bash and fish completions automatically. For a
+non-Nix build, register the completer in your shell rc file:
+
+```sh
+# zsh, in ~/.zshrc
+eval "$(COMPLETE=zsh argos)"
+
+# bash, in ~/.bashrc
+eval "$(COMPLETE=bash argos)"
+
+# fish, in ~/.config/fish/config.fish
+COMPLETE=fish argos | source
+```
+
+Beyond subcommands and flags, completion fills in live values:
+
+- `--host` offers machine IDs from your private inventory.
+- `vm start|stop|show|rm|logs|shell|tmux|restart|update` offer local VM IDs.
+- `sessions attach` offers `vm:<id>`, `host:<host>:` and local tmux names.
+
+Completers only read the local inventory file and this host's state directory.
+They never open SSH connections, so a slow or unreachable host cannot stall a
+Tab press, and remote session names are not enumerated.
+
 ## Releases
 
 `Cargo.toml` is the source of truth for the Argos version. The Nix package reads
@@ -306,7 +335,8 @@ nix develop --command bash -lc '
   python3 tests/vm_list.py &&
   python3 tests/remote_ssh.py &&
   python3 tests/remote_attach.py &&
-  python3 tests/tui.py
+  python3 tests/tui.py &&
+  python3 tests/completions.py
 '
 ```
 

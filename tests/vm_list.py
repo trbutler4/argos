@@ -49,6 +49,10 @@ def main():
     assert BINARY.is_file(), "Run cargo build --locked first"
     with tempfile.TemporaryDirectory(prefix="argos-vm-list-") as temp:
         root = Path(temp)
+        # Isolate from the developer's real private inventory: implicit
+        # [vm.defaults] there would otherwise leak into these assertions.
+        (root / "xdg").mkdir()
+        os.environ["XDG_CONFIG_HOME"] = str(root / "xdg")
         missing = run(str(BINARY), "vm", "list", "--state-dir", str(root / "missing"), "--json")
         assert missing.returncode == 0, missing.stderr
         empty = json.loads(missing.stdout)

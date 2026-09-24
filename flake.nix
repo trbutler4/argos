@@ -21,10 +21,18 @@
             version = cargoToml.package.version;
             src = pkgs.lib.cleanSource ./.;
             cargoLock.lockFile = ./Cargo.lock;
-            nativeBuildInputs = [ pkgs.makeWrapper ];
+            nativeBuildInputs = [ pkgs.makeWrapper pkgs.installShellFiles ];
             postInstall = ''
               wrapProgram $out/bin/argos \
                 --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.tmux pkgs.openssh pkgs.git ]}
+            '' + pkgs.lib.optionalString
+              (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) ''
+              # Dynamic completion: the emitted script re-invokes the wrapper on
+              # each Tab, so it must be generated after wrapProgram.
+              installShellCompletion --cmd argos \
+                --zsh <(COMPLETE=zsh $out/bin/argos) \
+                --bash <(COMPLETE=bash $out/bin/argos) \
+                --fish <(COMPLETE=fish $out/bin/argos)
             '';
             meta = {
               description = "Personal command center for tmux work";

@@ -56,8 +56,8 @@ documentation checks.
   `cargo build --locked`, `python3 tests/host_status.py`,
   `python3 tests/vm_list.py`, `python3 tests/local_tmux.py`,
   `python3 tests/config_cli.py`, `python3 tests/remote_ssh.py`,
-  `python3 tests/attach_tmux.py`, `python3 tests/remote_attach.py`, and
-  `python3 tests/tui.py`.
+  `python3 tests/attach_tmux.py`, `python3 tests/remote_attach.py`,
+  `python3 tests/tui.py`, and `python3 tests/completions.py`.
 
 ## Public repository boundary
 
