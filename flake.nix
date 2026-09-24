@@ -29,8 +29,16 @@
               (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) ''
               # Dynamic completion: the emitted script re-invokes the wrapper on
               # each Tab, so it must be generated after wrapProgram.
+              #
+              # clap emits a script intended for `eval` in an rc file, whose body
+              # only defines the completer and calls compdef. When installed into
+              # fpath instead, zsh autoloads it on the first Tab and the body must
+              # itself perform the completion, so append an invocation. Without
+              # this the first Tab for a given shell silently does nothing.
+              COMPLETE=zsh $out/bin/argos > argos.zsh
+              echo '_clap_dynamic_completer_argos "$@"' >> argos.zsh
               installShellCompletion --cmd argos \
-                --zsh <(COMPLETE=zsh $out/bin/argos) \
+                --zsh argos.zsh \
                 --bash <(COMPLETE=bash $out/bin/argos) \
                 --fish <(COMPLETE=fish $out/bin/argos)
             '';

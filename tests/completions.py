@@ -8,6 +8,8 @@ inventory, host or VM is touched.
 import json
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
 import tempfile
 import time
@@ -67,6 +69,38 @@ def record(vm_id, name, status):
         "created_at_unix_ms": None,
         "updated_at_unix_ms": None,
     }
+
+
+def zsh_first_tab(script_path, env, typed):
+    """Press Tab once in a real zsh with the script installed via fpath.
+
+    Regression guard for packaging: clap emits a script meant for `eval` in an
+    rc file, whose body only defines the completer and calls compdef. Installed
+    into fpath it is autoloaded on the first Tab, so the body must also invoke
+    the completer, otherwise the first Tab silently does nothing and the user
+    must press Tab twice. Returns raw terminal output, or None if zsh is absent.
+    """
+    zsh = shutil.which("zsh")
+    if zsh is None:
+        return None
+    driver = f"""
+zmodload zsh/zpty
+zpty z zsh -f
+drain() {{ local l; repeat 40 {{ if zpty -r -t z l 2>/dev/null; then printf '%s' "$l"; else sleep 0.1; fi }} }}
+zpty -w z 'PROMPT="RDY>"; fpath=({script_path.parent} $fpath)'
+zpty -w z 'autoload -Uz compinit; compinit -u -d {script_path.parent}/zcompdump'
+drain >/dev/null
+zpty -w -n z {shlex.quote(typed)}
+sleep 0.5
+drain >/dev/null
+zpty -w -n z $'\\t'
+sleep 2
+drain
+zpty -d z
+"""
+    result = subprocess.run([zsh, "-f", "-c", driver], env=env, text=True,
+                            capture_output=True, timeout=60)
+    return result.stdout
 
 
 def main():
@@ -138,10 +172,44 @@ def main():
         elapsed = time.monotonic() - start
         assert elapsed < 2.0, f"completion too slow: {elapsed:.2f}s"
 
-        # Corrupt state must not break the shell.
+        # An fpath install must work on the FIRST Tab, like a real shell
+        # profile. This is the packaging shape the Nix package produces, and it
+        # differs from `eval` in an rc file.
+        site = root / "site-functions"
+        site.mkdir()
+        script = subprocess.run([str(BINARY)], env=dict(env, COMPLETE="zsh"),
+                                text=True, capture_output=True, timeout=10)
+        assert script.returncode == 0, script.stderr
+        # Mirror the flake: append the invocation autoloading requires.
+        (site / "_argos").write_text(script.stdout + '_clap_dynamic_completer_argos "$@"\n')
+        out = zsh_first_tab(site / "_argos", env, "argos vm s")
+        if out is None:
+            print("NOTE: zsh not found, skipped fpath first-Tab check")
+        else:
+            # zsh should list the ambiguous vm subcommands on the first Tab.
+            for name in ("show", "start", "stop", "shell"):
+                assert name in out, f"first Tab missing {name!r}: {out!r}"
+            # And a unique dynamic VM id should be inserted outright.
+            unique = zsh_first_tab(site / "_argos", env, "argos sessions attach vm:w")
+            assert "eb" in unique, f"first Tab did not complete vm:web: {unique!r}"
+
+            # Guard the guard: without the appended invocation the first Tab
+            # must fail, proving this test can actually detect the regression.
+            bare = root / "bare-site"
+            bare.mkdir()
+            (bare / "_argos").write_text(script.stdout)
+            regressed = zsh_first_tab(bare / "_argos", env, "argos vm s")
+            assert "start" not in regressed, (
+                "control case unexpectedly completed, so this test cannot "
+                f"detect the first-Tab regression: {regressed!r}"
+            )
+        # Corrupt state must not break the shell. Kept last: unreadable state
+        # drops every VM candidate, which would mask the checks above.
         (vms / "broken.json").write_text("{not json")
         assert complete(env, "vm", "start", "") is not None
-    print("PASS: dynamic completion emits shell registration scripts and completes subcommands, VM ids, inventory hosts and attach targets from local state without SSH, errors or mutation.")
+        assert "web" not in complete(env, "vm", "start", ""), "corrupt state must degrade to empty"
+
+    print("PASS: dynamic completion emits shell registration scripts, completes subcommands, VM ids, inventory hosts and attach targets from local state without SSH, errors or mutation, and works on the first Tab when installed into zsh fpath.")
 
 
 if __name__ == "__main__":
