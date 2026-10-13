@@ -384,6 +384,11 @@ Not blockers for writing this scope:
 
 ## Evidence discipline
 
+Implementation of PR #1's origin-side session switching is tracked in
+[Single-attachment implementation](single-attachment-implementation.md), including
+the host-only `connect` loop, guarded client identification, real PTY/SSH lifecycle
+and stress evidence, and remaining human acceptance checks.
+
 Unit tests may check parsers, quoting, operation transitions and port selection, but
 must not substitute for the real SSH/tmux/VM/browser checks above. Use disposable test
 sessions and data, never kill existing user work for a test. Record commands, observed

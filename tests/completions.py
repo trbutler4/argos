@@ -136,7 +136,7 @@ def main():
 
         # Top-level and nested subcommands.
         top = complete(env, "")
-        for name in ("list", "sessions", "tui", "host", "hosts", "vm", "task"):
+        for name in ("list", "sessions", "tui", "host", "hosts", "vm", "task", "connect"):
             assert name in top, (name, top)
         assert "list" in complete(env, "vm", "") and "rm" in complete(env, "vm", "")
 
@@ -155,6 +155,9 @@ def main():
         targets = complete(env, "sessions", "attach", "")
         assert "vm:web" in targets and "vm:api" in targets, targets
         assert "host:alpha:" in targets and "host:beta:" in targets, targets
+        managed = complete(env, "connect", "")
+        assert "host:alpha:" in managed and "host:beta:" in managed, managed
+        assert "vm:web" not in managed and "vm:api" not in managed, managed
 
         # Prefixes filter, and remote hosts are never probed for sessions.
         assert complete(env, "sessions", "attach", "vm:w") == ["vm:web"]

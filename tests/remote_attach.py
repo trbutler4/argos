@@ -152,6 +152,31 @@ def main():
             wait(lambda: not remote_clients(), "plain remote client did not detach")
             assert before == tmux(remote_tmux, "list-panes", "-a", "-F", "#{pane_id}|#{pane_pid}")
 
+            # Preserve a second client while proving exit 78 reaches the origin
+            # through real SSH. Each old SSH process is reaped before the next
+            # starts; this is a transport probe, not a managed connection loop.
+            tmux(remote_tmux, "bind-key", "-n", "F12", "detach-client", "-E", "exit 78")
+            peer = terminal([*remote_tmux, "attach-session", "-t", target_id])
+            wait(lambda: len(remote_clients()) == 1, "handoff peer did not attach")
+            peer_clients = remote_clients()
+            for code in (78, 78, 0):
+                handoff = terminal([str(BINARY), "sessions", "attach", target_name,
+                                    "--config", str(config), "--host", "remote"])
+                wait(lambda: len(remote_clients()) == 2, "remote handoff client did not attach")
+                if code == 78:
+                    os.write(handoff[1], b"\x1b[24~")
+                else:
+                    os.write(handoff[1], b"\x02d")
+                wait(lambda: handoff[0].poll() is not None, "remote handoff did not exit")
+                assert handoff[0].returncode == code, handoff[0].returncode
+                assert termios.tcgetattr(handoff[2]) == handoff[3]
+                wait(lambda: remote_clients() == peer_clients, "handoff displaced another remote client")
+                assert peer[0].poll() is None
+                assert before == tmux(remote_tmux, "list-panes", "-a", "-F", "#{pane_id}|#{pane_pid}")
+            os.write(peer[1], b"\x02d")
+            wait(lambda: peer[0].poll() is not None, "handoff peer did not detach")
+            assert peer[0].returncode == 0
+            wait(lambda: not remote_clients(), "handoff left remote clients attached")
 
             # Inside local tmux opens a connection window instead of replacing the current pane.
             source = tmux(local_tmux, "new-session", "-d", "-P", "-F", "#{session_id}", "-s", "local", "/bin/sh")
@@ -193,6 +218,7 @@ def main():
                     sshd.kill(); sshd.wait()
     print("PASS: real SSH remote sessions attach from plain terminal and local tmux connection window,")
     print("      exact target IDs/names, detach behavior, terminal restoration and unchanged panes.")
+    print("      Repeated status-78 handoff crosses SSH and preserves another attached client.")
 
 
 if __name__ == "__main__":

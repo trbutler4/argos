@@ -58,6 +58,7 @@ fn select<'a>(sessions: &'a [tmux::Session], query: &str) -> Result<&'a tmux::Se
     }
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct AttachOptions {
     pub(crate) target: String,
     pub(crate) socket: Option<String>,
@@ -65,6 +66,83 @@ pub(crate) struct AttachOptions {
     pub(crate) host: Option<String>,
     pub(crate) local: bool,
     pub(crate) state_dir: Option<PathBuf>,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn validate_managed_target(options: &AttachOptions) -> Result<(), String> {
+    match parse_attach_spec(&options.target, options.host.as_deref())? {
+        AttachSpec::Vm { .. } => {
+            Err("connect supports host tmux only; VM targets are not supported".into())
+        }
+        AttachSpec::HostTmux { host: Some(_), .. } if options.local || options.socket.is_some() => {
+            Err("host targets cannot be combined with --local or --socket".into())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Prepare one managed attachment, retaining the resolved ID for reconnects.
+#[cfg(target_os = "linux")]
+pub(crate) fn prepare_managed(options: &mut AttachOptions) -> Result<Command, String> {
+    validate_managed_target(options)?;
+    let AttachSpec::HostTmux { session, host } =
+        parse_attach_spec(&options.target, options.host.as_deref())?
+    else {
+        unreachable!()
+    };
+    let target = resolve_target(
+        options.socket.clone(),
+        options.config_path.clone(),
+        host,
+        options.local,
+    )?;
+    if let Some(alias) = &target.ssh_alias {
+        validate_managed_transport(alias)?;
+    }
+    let selected = prepare_session(&target, &session)?;
+    let command = if let Some(alias) = &target.ssh_alias {
+        let mut command = remote_ssh_base(true);
+        let script = remote_attach_script(target.socket.as_deref(), &selected.id, true);
+        command.args([alias, &format!("export ARGOS_CONNECT_CLIENT=1; {script}")]);
+        command
+    } else {
+        let mut command = local_tmux_command(target.socket.as_deref(), &selected.id);
+        command.arg("-E"); // never copy the client marker into shared session state
+        command.env("ARGOS_CONNECT_CLIENT", "1");
+        command
+    };
+    options.target = if options.local || options.socket.is_some() {
+        selected.id
+    } else {
+        format!("host:{}:{}", target.id, selected.id)
+    };
+    options.host = None;
+    Ok(command)
+}
+
+// The first managed transport supports direct SSH. Reject proxies explicitly
+// rather than silently bypassing them or claiming ownership of arbitrary helpers.
+#[cfg(target_os = "linux")]
+pub(crate) fn validate_managed_transport(alias: &str) -> Result<(), String> {
+    let mut command = remote_ssh_base(true);
+    command.args(["-G", alias]);
+    let output = tmux::process::run(command, Instant::now() + Duration::from_secs(3))
+        .map_err(|_| "cannot inspect SSH configuration".to_owned())?;
+    if !output.status.success() {
+        return Err(format!(
+            "cannot inspect SSH configuration: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some((key, value)) = line.split_once(' ')
+            && matches!(key, "proxycommand" | "proxyjump")
+            && value != "none"
+        {
+            return Err("connect does not yet support ProxyCommand or ProxyJump; use direct SSH inventory aliases".into());
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -198,18 +276,7 @@ fn attach_host_tmux(
         target.socket = Some(env.socket.clone());
     }
 
-    let sessions = match tmux::discover(
-        target.socket.as_deref(),
-        target.ssh_alias.as_deref(),
-        Duration::from_secs(3),
-    ) {
-        Ok(sessions) => sessions,
-        Err(error) => {
-            eprintln!("error: {}: {}", error.code, error.message);
-            return ExitCode::from(1);
-        }
-    };
-    let selected = match select(&sessions, session) {
+    let selected = match prepare_session(&target, session) {
         Ok(session) => session,
         Err(error) => {
             eprintln!("error: {error}");
@@ -221,10 +288,22 @@ fn attach_host_tmux(
         (Some(env), None) => switch_inside(env, &selected.id),
         (None, None) => exec_local_tmux(target.socket.as_deref(), &selected.id),
         (Some(env), Some(alias)) => {
-            open_remote_window(env, &target.id, alias, target.socket.as_deref(), selected)
+            open_remote_window(env, &target.id, alias, target.socket.as_deref(), &selected)
         }
         (None, Some(alias)) => exec_remote_ssh(alias, target.socket.as_deref(), &selected.id),
     }
+}
+
+// Discovery and exact selection finish before an interactive command is started.
+// Native exec and managed supervision share selection without sharing lifetime.
+fn prepare_session(target: &AttachTarget, query: &str) -> Result<tmux::Session, String> {
+    let sessions = tmux::discover(
+        target.socket.as_deref(),
+        target.ssh_alias.as_deref(),
+        Duration::from_secs(3),
+    )
+    .map_err(|error| format!("{}: {}", error.code, error.message))?;
+    select(&sessions, query).cloned()
 }
 
 fn resolve_target(
@@ -269,13 +348,18 @@ fn resolve_target(
     })
 }
 
-fn exec_local_tmux(socket: Option<&str>, target: &str) -> ExitCode {
+fn local_tmux_command(socket: Option<&str>, target: &str) -> Command {
     let mut command = Command::new("tmux");
     command.args(["-u", "-N"]);
     if let Some(path) = socket {
         command.args(["-S", path]);
     }
     command.args(["attach-session", "-t", target]);
+    command
+}
+
+fn exec_local_tmux(socket: Option<&str>, target: &str) -> ExitCode {
+    let mut command = local_tmux_command(socket, target);
     #[cfg(unix)]
     {
         let error = command.exec();
@@ -290,7 +374,7 @@ fn exec_local_tmux(socket: Option<&str>, target: &str) -> ExitCode {
 }
 
 fn exec_remote_ssh(alias: &str, socket: Option<&str>, target: &str) -> ExitCode {
-    let mut command = remote_ssh_command(alias, socket, target, true);
+    let mut command = remote_ssh_command(alias, socket, target);
     #[cfg(unix)]
     {
         let error = command.exec();
@@ -345,11 +429,15 @@ fn open_remote_window(
     }
 }
 
-fn remote_ssh_command(alias: &str, socket: Option<&str>, target: &str, force_tty: bool) -> Command {
+fn remote_ssh_command(alias: &str, socket: Option<&str>, target: &str) -> Command {
+    let mut command = remote_ssh_base(false);
+    command.args([alias, &remote_attach_script(socket, target, false)]);
+    command
+}
+
+fn remote_ssh_base(managed: bool) -> Command {
     let mut command = Command::new("ssh");
-    if force_tty {
-        command.arg("-tt");
-    }
+    command.arg("-tt");
     command.env("LC_ALL", "C").args([
         "-o",
         "BatchMode=yes",
@@ -361,45 +449,45 @@ fn remote_ssh_command(alias: &str, socket: Option<&str>, target: &str, force_tty
         "ForwardAgent=no",
         "-o",
         "PermitLocalCommand=no",
-        alias,
-        &remote_attach_script(socket, target),
     ]);
+    if managed {
+        command.args([
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "ControlPath=none",
+            "-o",
+            "ControlPersist=no",
+            "-o",
+            "ConnectTimeout=3",
+            "-o",
+            "ConnectionAttempts=1",
+            "-o",
+            "ServerAliveInterval=5",
+            "-o",
+            "ServerAliveCountMax=2",
+            "-o",
+            "EscapeChar=none",
+            "-o",
+            "ForkAfterAuthentication=no",
+            "-o",
+            "StdinNull=no",
+        ]);
+    }
     command
 }
 
 fn remote_ssh_shell_command(alias: &str, socket: Option<&str>, target: &str) -> String {
-    let mut parts = vec!["exec".into(), "ssh".into(), "-tt".into()];
-    for arg in [
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "-o",
-        "ClearAllForwardings=yes",
-        "-o",
-        "ForwardAgent=no",
-        "-o",
-        "PermitLocalCommand=no",
-        alias,
-        &remote_attach_script(socket, target),
-    ] {
-        parts.push(shell_quote(arg));
-    }
-    parts.join(" ")
+    let command = remote_ssh_command(alias, socket, target);
+    format!("exec ssh {}", shell_arguments(&command))
 }
 
-fn remote_attach_script(socket: Option<&str>, target: &str) -> String {
-    let mut args = vec!["-u".to_string(), "-N".to_string()];
-    if let Some(path) = socket {
-        args.push("-S".into());
-        args.push(path.into());
+fn remote_attach_script(socket: Option<&str>, target: &str, managed: bool) -> String {
+    let mut command = local_tmux_command(socket, target);
+    if managed {
+        command.arg("-E");
     }
-    args.extend(["attach-session".into(), "-t".into(), target.into()]);
-    let tmux = args
-        .iter()
-        .map(|arg| shell_quote(arg))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let tmux = shell_arguments(&command);
     if let Some(path) = socket {
         format!(
             "if [ -e {} ] && [ ! -S {} ]; then echo 'argos: invalid_socket' >&2; exit 125; fi; LC_ALL=C exec tmux {tmux}",
@@ -409,6 +497,15 @@ fn remote_attach_script(socket: Option<&str>, target: &str) -> String {
     } else {
         format!("LC_ALL=C exec tmux {tmux}")
     }
+}
+
+fn shell_arguments(command: &Command) -> String {
+    command
+        .get_args()
+        // These builders accept only UTF-8 strings, never arbitrary OS paths.
+        .map(|arg| shell_quote(arg.to_str().expect("attachment arguments are UTF-8")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn shell_quote(value: &str) -> String {
@@ -581,7 +678,7 @@ mod tests {
 
     #[test]
     fn remote_script_quotes_exact_target() {
-        let script = remote_attach_script(Some("/tmp/a b'sock"), "$12");
+        let script = remote_attach_script(Some("/tmp/a b'sock"), "$12", false);
         assert!(script.contains("'/tmp/a b'\\''sock'"));
         assert!(script.contains("'$12'"));
         assert!(script.contains("exec tmux"));

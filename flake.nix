@@ -23,6 +23,7 @@
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [ pkgs.makeWrapper pkgs.installShellFiles ];
             postInstall = ''
+              install -Dm644 examples/connect.tmux.conf $out/share/argos/connect.tmux.conf
               wrapProgram $out/bin/argos \
                 --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.tmux pkgs.openssh pkgs.git ]}
             '' + pkgs.lib.optionalString

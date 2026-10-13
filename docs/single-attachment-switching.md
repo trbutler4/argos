@@ -1,7 +1,8 @@
 # Proposal: single-attachment session switching
 
-Status: draft design only. No CLI behavior, keybindings, or connection management
-is implemented by this document. Command names and the protocol below are proposed.
+Status: original design proposal, retained for context. The host-only implementation
+is now included in this branch; see the [implementation review guide](single-attachment-implementation.md)
+for current behavior, validation, and decisions that differ from this proposal.
 
 ## Goal
 

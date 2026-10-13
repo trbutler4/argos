@@ -10,6 +10,18 @@ use std::{
 
 mod completions;
 mod config;
+#[cfg(target_os = "linux")]
+mod connect;
+#[cfg(not(target_os = "linux"))]
+mod connect {
+    pub(crate) fn run(
+        _: Option<String>,
+        _: crate::sessions::AttachOptions,
+    ) -> std::process::ExitCode {
+        eprintln!("error: managed connect currently requires Linux");
+        std::process::ExitCode::from(1)
+    }
+}
 mod host;
 mod sessions;
 mod tmux;
@@ -24,6 +36,19 @@ struct Cli {
 }
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Own one host tmux attachment at a time, with an origin-side picker.
+    Connect {
+        #[arg(add = ArgValueCandidates::new(completions::host_targets))]
+        target: Option<String>,
+        #[arg(long, conflicts_with_all=["config", "host", "local"], value_hint = ValueHint::FilePath)]
+        socket: Option<String>,
+        #[arg(long, conflicts_with_all=["socket", "local"], value_hint = ValueHint::FilePath)]
+        config: Option<std::path::PathBuf>,
+        #[arg(long, conflicts_with_all=["socket", "local"], add = ArgValueCandidates::new(completions::hosts))]
+        host: Option<String>,
+        #[arg(long, conflicts_with_all=["socket", "config", "host"])]
+        local: bool,
+    },
     /// List configured tmux sessions.
     List {
         #[arg(long)]
@@ -383,6 +408,23 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     };
     match command {
+        Command::Connect {
+            target,
+            socket,
+            config,
+            host,
+            local,
+        } => connect::run(
+            target,
+            sessions::AttachOptions {
+                target: String::new(),
+                socket,
+                config_path: config,
+                host,
+                local,
+                state_dir: None,
+            },
+        ),
         Command::List {
             json,
             socket,

@@ -35,6 +35,7 @@ pub(crate) fn run(
         config,
         host,
         local,
+        host_only: false,
     };
     let request = match snapshot_request(
         args.socket.clone(),
@@ -64,6 +65,85 @@ struct TuiArgs {
     config: Option<PathBuf>,
     host: Option<String>,
     local: bool,
+    host_only: bool,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) enum PickResult {
+    Select(sessions::AttachOptions),
+    Retry,
+    Quit(u8),
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn pick_host(
+    options: &sessions::AttachOptions,
+    previous: Option<&sessions::AttachOptions>,
+    error: Option<&str>,
+    owner: &mut crate::connect::TerminalOwner,
+) -> io::Result<PickResult> {
+    let args = TuiArgs {
+        socket: options.socket.clone(),
+        config: options.config_path.clone(),
+        host: options.host.clone(),
+        local: options.local,
+        host_only: true,
+    };
+    let request = snapshot_request(
+        args.socket.clone(),
+        args.config.clone(),
+        args.host.clone(),
+        args.local,
+    )
+    .map_err(|(message, _)| io::Error::other(message))?;
+    for (_, alias, _) in &request.machines {
+        if let Some(alias) = alias {
+            sessions::validate_managed_transport(alias).map_err(io::Error::other)?;
+        }
+    }
+    let mut app = App::new(request, args);
+    app.notice = Some(match error {
+        Some(error) => {
+            format!("Connection failed: {error}\nEnter choose | R retry last target | q quit")
+        }
+        None => "Origin-side host picker. Enter connect | q quit".into(),
+    });
+    if let Some(previous) = previous {
+        app.notice.as_mut().unwrap().push_str(&format!(
+            "\nEsc reconnects last Argos-selected target: {:?} (not native tmux switches)",
+            previous.target
+        ));
+    }
+    let mut terminal = TerminalGuard::enter()?;
+    app.refresh();
+    loop {
+        if let Some(code) = owner.poll_idle()? {
+            return Ok(PickResult::Quit(code));
+        }
+        terminal.terminal.draw(|frame| app.render(frame))?;
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+        {
+            match key.code {
+                KeyCode::Char('q') => return Ok(PickResult::Quit(0)),
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Ok(PickResult::Quit(130));
+                }
+                KeyCode::Esc | KeyCode::Char('R') => {
+                    return Ok(if previous.is_some() {
+                        PickResult::Retry
+                    } else {
+                        PickResult::Quit(0)
+                    });
+                }
+                _ => {
+                    if let Some(Action::Attach(attach)) = app.handle_key(key) {
+                        return Ok(PickResult::Select(attach.into()));
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,14 +157,20 @@ struct PendingAttach {
 }
 
 fn attach_selected(attach: PendingAttach) -> ExitCode {
-    sessions::attach(sessions::AttachOptions {
-        target: attach.target,
-        socket: attach.socket,
-        config_path: attach.config_path,
-        host: attach.host,
-        local: attach.local,
-        state_dir: attach.state_dir,
-    })
+    sessions::attach(attach.into())
+}
+
+impl From<PendingAttach> for sessions::AttachOptions {
+    fn from(attach: PendingAttach) -> Self {
+        Self {
+            target: attach.target,
+            socket: attach.socket,
+            config_path: attach.config_path,
+            host: attach.host,
+            local: attach.local,
+            state_dir: attach.state_dir,
+        }
+    }
 }
 
 struct TerminalGuard {
@@ -151,6 +237,7 @@ struct App {
     rows: Vec<Row>,
     selected: usize,
     last_status: String,
+    notice: Option<String>,
 }
 
 impl App {
@@ -168,19 +255,22 @@ impl App {
             rows: Vec::new(),
             selected: 0,
             last_status: "loading".into(),
+            notice: None,
         }
     }
 
     fn refresh(&mut self) {
         self.snapshot = discover_snapshot(&self.request);
-        match vm::snapshot(None) {
-            Ok(snapshot) => {
-                self.vm_snapshot = Some(snapshot);
-                self.vm_error = None;
-            }
-            Err(error) => {
-                self.vm_snapshot = None;
-                self.vm_error = Some(error);
+        if !self.args.host_only {
+            match vm::snapshot(None) {
+                Ok(snapshot) => {
+                    self.vm_snapshot = Some(snapshot);
+                    self.vm_error = None;
+                }
+                Err(error) => {
+                    self.vm_snapshot = None;
+                    self.vm_error = Some(error);
+                }
             }
         }
         self.rows = rows(
@@ -215,10 +305,17 @@ impl App {
             .filter(|host| host.error.is_some())
             .count()
             + usize::from(self.vm_error.is_some());
-        self.last_status = format!(
-            "{} hosts, {total_sessions} sessions, {total_vms} vms, {failed} errors",
-            self.snapshot.hosts.len()
-        );
+        self.last_status = if self.args.host_only {
+            format!(
+                "{} hosts, {total_sessions} sessions, {failed} errors",
+                self.snapshot.hosts.len()
+            )
+        } else {
+            format!(
+                "{} hosts, {total_sessions} sessions, {total_vms} vms, {failed} errors",
+                self.snapshot.hosts.len()
+            )
+        };
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
@@ -263,21 +360,27 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),
+                Constraint::Length(if self.args.host_only { 6 } else { 3 }),
                 Constraint::Min(3),
                 Constraint::Length(3),
             ])
             .split(area);
 
-        let title = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "Argos",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" sessions and VMs"),
-        ]))
+        let title = Paragraph::new(if let Some(notice) = &self.notice {
+            std::iter::once(Line::from("Argos connect"))
+                .chain(notice.lines().map(Line::from))
+                .collect()
+        } else {
+            vec![Line::from(vec![
+                Span::styled(
+                    "Argos",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" sessions and VMs"),
+            ])]
+        })
         .block(Block::default().borders(Borders::ALL))
         .wrap(Wrap { trim: true });
         frame.render_widget(title, chunks[0]);
@@ -390,7 +493,9 @@ fn host_rows(host: &Host, vms: Vec<&vm::VmRecord>, args: &TuiArgs) -> Vec<Row> {
             }));
         }
     }
-    rows.extend(vm_section_rows(&host.id, vms, args));
+    if !args.host_only {
+        rows.extend(vm_section_rows(&host.id, vms, args));
+    }
     rows
 }
 
@@ -546,6 +651,7 @@ mod tests {
             config: Some(PathBuf::from("config.local.toml")),
             host: None,
             local: false,
+            host_only: false,
         }
     }
 

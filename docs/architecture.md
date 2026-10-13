@@ -104,6 +104,16 @@ hub, OSC 52 clipboard and resize need real tests rather than assumptions.
 If two clients join the same session, accept tmux's native behavior and make
 it visible. Do not mistake multiple clients for duplicate environments.
 
+For a single interactive attachment without nesting, Linux `argos connect`
+retains an origin-side owner and uses the existing sessions layer's target and
+command preparation. A guarded destination binding exits only its managed client
+with status 78; the owner reaps the transport before opening a host-only picker.
+Cancel reconnects the last Argos-selected target. This path supports local tmux
+and direct SSH host sessions, with VM and proxy/jump transports excluded for now.
+See the [implementation review guide](single-attachment-implementation.md) for
+client identification, foreground process groups, lifecycle tests, and remaining
+human acceptance checks.
+
 ## 4. A managed task environment
 
 Each environment has a stable ID, a display name, a home machine, a project URL,

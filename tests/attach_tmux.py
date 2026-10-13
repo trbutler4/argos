@@ -152,6 +152,26 @@ def main():
             assert tmux("show-options", "-g", "prefix") == prefix_before
             assert attached().get(str(peer[0].pid)) == target
             assert before == tmux("list-panes", "-a", "-F", "#{pane_id}|#{pane_pid}")
+
+            # Protocol feasibility: only the invoking client exits with status 78.
+            # A fixture-only binding supplies the invoking-client context, just
+            # as a future guarded binding will. This server is disposable.
+            tmux("bind-key", "-n", "F12", "detach-client", "-E", "exit 78")
+            for code in (78, 78, 0):
+                handoff = terminal([*prefix, target_name, "--config", str(config)])
+                wait(lambda: attached().get(str(handoff[0].pid)) == target,
+                     "handoff client did not attach")
+                assert len(attached()) == 2
+                if code == 78:
+                    os.write(handoff[1], b"\x1b[24~")
+                else:
+                    os.write(handoff[1], b"\x02d")
+                wait(lambda: handoff[0].poll() is not None, "handoff client did not exit")
+                assert handoff[0].returncode == code, handoff[0].returncode
+                assert termios.tcgetattr(handoff[2]) == handoff[3]
+                assert attached() == {str(peer[0].pid): target}, "handoff displaced another client"
+                assert before == tmux("list-panes", "-a", "-F", "#{pane_id}|#{pane_pid}")
+            assert tmux("show-options", "-g", "prefix") == prefix_before
         finally:
             for socket_path in (sock, second):
                 run("tmux", "-N", "-S", str(socket_path), "kill-server")
@@ -167,6 +187,7 @@ def main():
                 os.close(slave)
     print("PASS: real PTY attach, same-server switch, other-client preservation, exact names,")
     print("      ambiguous/cross-server refusal, detach, terminal restoration and unchanged pane PIDs.")
+    print("      Repeated status-78 handoff preserves a second client on the same session.")
 
 
 if __name__ == "__main__":

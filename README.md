@@ -141,6 +141,42 @@ argos vm tmux trade-feature
 
 Host sessions are unmanaged. Argos lists and attaches to them, but does not own their lifecycle.
 
+### Single-attachment switching
+
+From a plain Linux terminal outside tmux and SSH:
+
+```sh
+argos connect --config ./config.local.toml
+argos connect host:desktop:work --config ./config.local.toml
+argos connect work --local
+```
+
+`connect` keeps an origin-side Argos process and owns at most one interactive
+attachment. It supports existing host tmux sessions, locally or over direct SSH.
+VM targets and SSH ProxyCommand/ProxyJump configurations are not supported yet.
+
+The optional [tmux binding](examples/connect.tmux.conf) uses F12 to detach only
+the invoking managed client and return to the origin picker. Review your existing
+F12 binding before sourcing the file on a destination server. The Nix package
+installs it at `share/argos/connect.tmux.conf`; it is never loaded automatically.
+The guard requires Linux `/proc` and GNU grep on the destination. Unmanaged
+clients receive guidance and stay attached.
+
+- **Enter:** attach to the selected host session.
+- **Escape:** exit the initial picker; otherwise reconnect the last
+  **Argos-selected** target. Native same-server tmux switches do not update it.
+- **Shift-R:** retry the last target after failure; **r:** refresh discovery.
+- **q:** quit the picker. Normal tmux detach exits managed mode to the shell.
+
+Selection disconnects first, so cancel requires reconnection and can fail.
+Failures remain visible with retry, selection, and quit controls. Sessions and
+pane processes remain alive while switching. Managed attachment uses tmux `-E`
+to keep client metadata out of shared session environment; it does not update
+session environment variables. SSH masters are neither reused nor terminated.
+
+See the [implementation review guide](docs/single-attachment-implementation.md)
+for ownership details, tested behavior, and remaining human acceptance checks.
+
 ## VMs
 
 Create or enter a task VM for a repo:
@@ -324,10 +360,10 @@ creating another release.
 ## Development checks
 
 ```sh
-nix develop --command bash -lc '
-  cargo fmt -- --check &&
-  cargo clippy --locked -- -D warnings &&
-  cargo test --locked -- --nocapture &&
+nix develop --command bash -c '
+  cargo fmt --check &&
+  cargo test --locked &&
+  cargo clippy --locked --all-targets -- -D warnings &&
   cargo build --locked &&
   python3 tests/local_tmux.py &&
   python3 tests/config_cli.py &&
@@ -335,6 +371,8 @@ nix develop --command bash -lc '
   python3 tests/vm_list.py &&
   python3 tests/remote_ssh.py &&
   python3 tests/remote_attach.py &&
+  python3 tests/attach_tmux.py &&
+  python3 tests/connect.py &&
   python3 tests/tui.py &&
   python3 tests/completions.py
 '
