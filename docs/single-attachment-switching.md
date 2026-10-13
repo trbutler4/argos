@@ -1,6 +1,6 @@
 # Proposal: single-attachment session switching
 
-Status: original design proposal, retained for context. The host-only implementation
+Status: original design proposal, retained for context. The implementation
 is now included in this branch; see the [implementation review guide](single-attachment-implementation.md)
 for current behavior, validation, and decisions that differ from this proposal.
 

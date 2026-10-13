@@ -139,9 +139,10 @@ argos sessions attach vm:trade-feature
 argos vm tmux trade-feature
 ```
 
-Host sessions are unmanaged. Argos lists and attaches to them, but does not own their lifecycle.
+Host tmux sessions remain user-owned. Argos manages every interactive attachment
+and its transport, while tmux owns the sessions and pane processes.
 
-### Single-attachment switching
+### Managed connections are the default
 
 From a plain Linux terminal outside tmux and SSH:
 
@@ -149,20 +150,31 @@ From a plain Linux terminal outside tmux and SSH:
 argos connect --config ./config.local.toml
 argos connect host:desktop:work --config ./config.local.toml
 argos connect work --local
+argos tui --config ./config.local.toml
+argos sessions attach host:desktop:work --config ./config.local.toml
+argos sessions attach vm:my-task
 ```
 
-`connect` keeps an origin-side Argos process and owns at most one interactive
-attachment. It supports existing host tmux sessions, locally or over direct SSH.
-VM targets and SSH ProxyCommand/ProxyJump configurations are not supported yet.
+`tui`, `sessions attach`, and `connect` use the same origin-side connection
+owner and picker. `vm tmux`, `vm shell`, and the attachment phase of `vm up` /
+`task up` also keep Argos supervising SSH. There is no unmanaged attach mode and
+no fallback that opens another SSH window inside tmux. Detectable nested entry
+is rejected with guidance to return to the origin picker. Lifecycle-only
+`--no-attach` / `--json` operations may still run inside tmux or SSH.
+
+Host tmux and local VM tmux share the picker and switching loop. VM shell is a
+supervised plain SSH shell; exit the shell to return to the caller. SSH
+ProxyCommand/ProxyJump configurations are not supported yet.
 
 The optional [tmux binding](examples/connect.tmux.conf) uses F12 to detach only
-the invoking managed client and return to the origin picker. Review your existing
+the invoking managed client and return to the origin picker. Ownership does not
+depend on installing this key. Review your existing
 F12 binding before sourcing the file on a destination server. The Nix package
 installs it at `share/argos/connect.tmux.conf`; it is never loaded automatically.
 The guard requires Linux `/proc` and GNU grep on the destination. Unmanaged
 clients receive guidance and stay attached.
 
-- **Enter:** attach to the selected host session.
+- **Enter:** attach to the selected host or VM session.
 - **Escape:** exit the initial picker; otherwise reconnect the last
   **Argos-selected** target. Native same-server tmux switches do not update it.
 - **Shift-R:** retry the last target after failure; **r:** refresh discovery.
@@ -173,6 +185,9 @@ Failures remain visible with retry, selection, and quit controls. Sessions and
 pane processes remain alive while switching. Managed attachment uses tmux `-E`
 to keep client metadata out of shared session environment; it does not update
 session environment variables. SSH masters are neither reused nor terminated.
+Guest tmux is created before marking its attaching client, keeping the marker
+out of a newly started guest server and its panes. VM reconnects preserve recorded
+guest host keys instead of replacing them on each attachment.
 
 See the [implementation review guide](docs/single-attachment-implementation.md)
 for ownership details, tested behavior, and remaining human acceptance checks.
@@ -382,4 +397,11 @@ Package check:
 
 ```sh
 nix build .# --print-build-logs
+```
+
+Explicit real-VM connection acceptance (requires local KVM; creates, boots, then
+removes one disposable VM using generated credentials and isolated HOME/state):
+
+```sh
+nix develop --command python3 tests/vm_connect.py
 ```

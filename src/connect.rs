@@ -73,9 +73,9 @@ fn configure(target: Option<&str>, options: &mut sessions::AttachOptions) -> Res
     Ok(())
 }
 
-fn run_inner(target: Option<String>, options: &mut sessions::AttachOptions) -> Result<u8, String> {
+pub(crate) fn check_origin() -> Result<(), String> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        return Err("connect requires a terminal on stdin and stdout".into());
+        return Err("Argos attachment requires a terminal on stdin and stdout".into());
     }
     for name in [
         "TMUX",
@@ -86,10 +86,15 @@ fn run_inner(target: Option<String>, options: &mut sessions::AttachOptions) -> R
     ] {
         if std::env::var_os(name).is_some_and(|value| !value.is_empty()) {
             return Err(format!(
-                "connect must start in the original terminal outside tmux and SSH ({name} is set)"
+                "Argos must start in the original terminal outside tmux and SSH ({name} is set); use the managed return-to-picker binding to switch connections"
             ));
         }
     }
+    Ok(())
+}
+
+fn run_inner(target: Option<String>, options: &mut sessions::AttachOptions) -> Result<u8, String> {
+    check_origin()?;
     let request = snapshot_request(
         options.socket.clone(),
         options.config_path.clone(),
@@ -103,7 +108,13 @@ fn run_inner(target: Option<String>, options: &mut sessions::AttachOptions) -> R
         }
     }
     let mut terminal = TerminalOwner::new().map_err(|e| e.to_string())?;
-    let mut next = target.map(|_| options.clone());
+    let mut next = target.map(|target| {
+        let mut selected = options.clone();
+        if target.starts_with("vm:") {
+            selected.local = false;
+        }
+        selected
+    });
     let mut previous = None;
     let mut error = None;
     loop {
@@ -113,7 +124,7 @@ fn run_inner(target: Option<String>, options: &mut sessions::AttachOptions) -> R
         let mut selected = match next.take() {
             Some(selected) => selected,
             None => {
-                match tui::pick_host(options, previous.as_ref(), error.as_deref(), &mut terminal)
+                match tui::pick_session(options, previous.as_ref(), error.as_deref(), &mut terminal)
                     .map_err(|e| e.to_string())?
                 {
                     tui::PickResult::Select(selected) => selected,
@@ -133,12 +144,14 @@ fn run_inner(target: Option<String>, options: &mut sessions::AttachOptions) -> R
                 continue;
             }
         };
+        let vm_shell = selected.vm_shell;
         previous = Some(selected);
         if let Some(code) = terminal.poll_idle().map_err(|e| e.to_string())? {
             return Ok(code);
         }
         match terminal.attach(command).map_err(|e| e.to_string())? {
             AttachmentOutcome::Detached => return Ok(0),
+            AttachmentOutcome::Picker if vm_shell => return Ok(PICKER_STATUS as u8),
             AttachmentOutcome::Picker => error = None,
             AttachmentOutcome::Failed(message) => error = Some(message),
             AttachmentOutcome::Interrupted(code) => return Ok(code),

@@ -36,6 +36,7 @@ def main():
         assert shutil.which(tool), f"missing {tool}; run inside nix develop"
     assert BINARY.is_file(), "Run cargo build --locked first"
     clients = []
+    outputs = {}
     with tempfile.TemporaryDirectory(prefix="argos-remote-attach-", dir=os.environ.get("XDG_RUNTIME_DIR")) as directory:
         root = Path(directory)
         wrapper_dir = root / "ssh-wrapper"
@@ -46,9 +47,10 @@ def main():
         wrapper = wrapper_dir / "ssh"
         wrapper.write_text(f"#!/bin/sh\nprintf . >> {ssh_marker}\nexec {actual_ssh} -F {ssh_config} \"$@\"\n")
         wrapper.chmod(0o755)
-        env = dict(os.environ, TERM="xterm-256color", PATH=str(wrapper_dir) + os.pathsep + os.environ["PATH"])
-        env.pop("TMUX", None)
-        env.pop("TMUX_PANE", None)
+        env = dict(os.environ, TERM="xterm-256color", PATH=str(wrapper_dir) + os.pathsep + os.environ["PATH"],
+                   ARGOS_STATE_DIR=str(root / "empty-state"))
+        for name in ("TMUX", "TMUX_PANE", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
+            env.pop(name, None)
 
         server_key = root / "server_ed25519"
         client_key = root / "client_ed25519"
@@ -108,8 +110,10 @@ def main():
             for process, master, slave, _ in clients:
                 while select.select([master], [], [], 0)[0]:
                     try:
-                        if not os.read(master, 65536):
+                        data = os.read(master, 65536)
+                        if not data:
                             break
+                        outputs[process.pid] = (outputs.get(process.pid, b"") + data)[-100000:]
                     except OSError:
                         break
 
@@ -141,7 +145,7 @@ def main():
             target_id = tmux(remote_tmux, "new-session", "-d", "-P", "-F", "#{session_id}", "-s", target_name, "/bin/sh")
             before = tmux(remote_tmux, "list-panes", "-a", "-F", "#{pane_id}|#{pane_pid}")
 
-            # Plain terminal remote sessions attach execs SSH, attaches to remote tmux, then detaches cleanly.
+            # Normal sessions attach retains its owner while SSH enters tmux.
             plain = terminal([str(BINARY), "sessions", "attach", target_name, "--config", str(config), "--host", "remote"])
             wait(lambda: any(target_name in line for line in remote_clients()), "plain terminal did not sessions attach remotely")
             assert ssh_marker.exists(), "Argos did not invoke the configured SSH wrapper"
@@ -165,10 +169,14 @@ def main():
                 wait(lambda: len(remote_clients()) == 2, "remote handoff client did not attach")
                 if code == 78:
                     os.write(handoff[1], b"\x1b[24~")
+                    wait(lambda: remote_clients() == peer_clients, "handoff did not detach its client")
+                    wait(lambda: b"Origin-side" in outputs.get(handoff[0].pid, b""), "origin picker did not render")
+                    assert handoff[0].poll() is None, "sessions attach replaced its owner"
+                    os.write(handoff[1], b"q")
                 else:
                     os.write(handoff[1], b"\x02d")
                 wait(lambda: handoff[0].poll() is not None, "remote handoff did not exit")
-                assert handoff[0].returncode == code, handoff[0].returncode
+                assert handoff[0].returncode == 0, handoff[0].returncode
                 assert termios.tcgetattr(handoff[2]) == handoff[3]
                 wait(lambda: remote_clients() == peer_clients, "handoff displaced another remote client")
                 assert peer[0].poll() is None
@@ -178,7 +186,7 @@ def main():
             assert peer[0].returncode == 0
             wait(lambda: not remote_clients(), "handoff left remote clients attached")
 
-            # Inside local tmux opens a connection window instead of replacing the current pane.
+            # Nested entry is rejected before opening an SSH connection window.
             source = tmux(local_tmux, "new-session", "-d", "-P", "-F", "#{session_id}", "-s", "local", "/bin/sh")
             pane = tmux(local_tmux, "display-message", "-p", "-t", source, "#{pane_id}")
             actor = terminal([*local_tmux, "attach-session", "-t", source])
@@ -189,13 +197,9 @@ def main():
             marker = root / "inside-status"
             tmux(local_tmux, "send-keys", "-t", pane, "-l", command + "; printf '%s' $? > " + shlex.quote(str(marker)))
             tmux(local_tmux, "send-keys", "-t", pane, "Enter")
-            wait(lambda: marker.exists() and marker.read_text() == "0", "inside tmux command failed")
-            wait(lambda: "argos:remote:" in tmux(local_tmux, "list-windows", "-F", "#{window_name}"), "remote connection window was not created")
-            wait(lambda: any(target_name in line for line in remote_clients()), "local connection window did not sessions attach remotely")
-            windows = [line.split("|", 1) for line in tmux(local_tmux, "list-windows", "-F", "#{window_id}|#{window_name}").splitlines()]
-            remote_window = next(window_id for window_id, name in windows if name.startswith("argos:remote:"))
-            tmux(local_tmux, "send-keys", "-t", remote_window, "C-b", "d")
-            wait(lambda: not remote_clients(), "remote client from connection window did not detach")
+            wait(lambda: marker.exists() and marker.read_text() == "1", "nested entry was not rejected")
+            assert "argos:remote:" not in tmux(local_tmux, "list-windows", "-F", "#{window_name}")
+            assert not remote_clients(), "nested entry opened remote attachment"
             assert actor[0].poll() is None, "local tmux client was detached instead of the remote tmux client"
             assert before == tmux(remote_tmux, "list-panes", "-a", "-F", "#{pane_id}|#{pane_pid}")
         finally:
@@ -216,7 +220,7 @@ def main():
                     sshd.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     sshd.kill(); sshd.wait()
-    print("PASS: real SSH remote sessions attach from plain terminal and local tmux connection window,")
+    print("PASS: real SSH managed sessions attach from plain terminal and nested entry refusal,")
     print("      exact target IDs/names, detach behavior, terminal restoration and unchanged panes.")
     print("      Repeated status-78 handoff crosses SSH and preserves another attached client.")
 

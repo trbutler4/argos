@@ -504,16 +504,15 @@ pub(crate) fn update(options: UpdateOptions) -> ExitCode {
 pub(crate) fn up(options: UpOptions) -> ExitCode {
     if !options.no_attach
         && !options.json
-        && (!std::io::stdin().is_terminal() || !std::io::stdout().is_terminal())
+        && let Err(error) = crate::connect::check_origin()
     {
-        eprintln!(
-            "error: shell_error: vm up requires a terminal unless --no-attach or --json is used"
-        );
+        eprintln!("error: {error}; use --no-attach or --json for lifecycle-only operations");
         return ExitCode::from(1);
     }
     let json = options.json;
     let no_attach = options.no_attach || json;
     let state_dir = options.state_dir.clone();
+    let config_path = options.config.clone();
     let id = options.id.clone().unwrap_or_else(|| slug(&options.name));
     let output = match up_vm(options) {
         Ok(output) => output,
@@ -531,10 +530,14 @@ pub(crate) fn up(options: UpOptions) -> ExitCode {
     if no_attach {
         ExitCode::SUCCESS
     } else {
-        guest_command(GuestCommandOptions {
-            id,
+        crate::sessions::attach(crate::sessions::AttachOptions {
+            target: format!("vm:{id}"),
+            socket: None,
+            config_path,
+            host: None,
+            local: false,
             state_dir,
-            tmux: true,
+            vm_shell: false,
         })
     }
 }
@@ -623,14 +626,15 @@ pub(crate) fn remove(options: RemoveOptions) -> ExitCode {
 }
 
 pub(crate) fn guest_command(options: GuestCommandOptions) -> ExitCode {
-    match run_guest_command(options) {
-        Ok(code) => code,
-        Err(error) => {
-            eprintln!("error: {}: {}", error.code, error.message);
-            let code = if error.code == "invalid_args" { 2 } else { 1 };
-            ExitCode::from(code)
-        }
-    }
+    crate::sessions::attach(crate::sessions::AttachOptions {
+        target: format!("vm:{}", options.id),
+        socket: None,
+        config_path: None,
+        host: None,
+        local: false,
+        state_dir: options.state_dir,
+        vm_shell: !options.tmux,
+    })
 }
 
 fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
@@ -1781,7 +1785,11 @@ fn build_runner(instance_dir: &Path) -> Result<PathBuf, VmError> {
     Ok(out_link)
 }
 
-fn run_guest_command(options: GuestCommandOptions) -> Result<ExitCode, VmError> {
+pub(crate) fn prepare_guest_command(options: GuestCommandOptions) -> Result<Command, String> {
+    guest_command_plan(options).map_err(|e| format!("{}: {}", e.code, e.message))
+}
+
+fn guest_command_plan(options: GuestCommandOptions) -> Result<Command, VmError> {
     if !valid_id(&options.id) {
         return Err(invalid_args(
             "VM id must be 1-64 chars of letters, digits, '_' or '-'",
@@ -1813,19 +1821,24 @@ fn run_guest_command(options: GuestCommandOptions) -> Result<ExitCode, VmError> 
         .map(PathBuf::from)
         .unwrap_or_else(|| state_root.join("instances").join(&record.id));
     let known_hosts = instance_dir.join("known_hosts");
-    refresh_guest_known_hosts(&record, &instance_dir)?;
+    // Preserve the existing first-use enrollment, but never replace recorded
+    // trust while reconnecting. A changed key must fail strict SSH verification.
+    if !known_hosts.exists() {
+        refresh_guest_known_hosts(&record, &instance_dir)?;
+    }
     let destination = format!("{user}@{host}");
-    let mut command = Command::new("ssh");
+    let mut command = crate::sessions::ssh_command();
     command
-        .arg("-tt")
         .args(["-p", &port.to_string()])
-        .args(["-o", "BatchMode=yes"])
-        .args(["-o", "StrictHostKeyChecking=yes"])
         .args([
             "-o",
             &format!("UserKnownHostsFile={}", known_hosts.display()),
         ])
         .arg(destination);
+    crate::sessions::validate_ssh_command(&command).map_err(|message| VmError {
+        code: "ssh_error",
+        message,
+    })?;
     let guest_workdir = record.guest_workdir.as_deref().unwrap_or("/workspace/repo");
     let workspace_prefix = format!(
         "cd {} 2>/dev/null || cd /workspace/repo 2>/dev/null || cd /workspace 2>/dev/null || cd",
@@ -1833,32 +1846,19 @@ fn run_guest_command(options: GuestCommandOptions) -> Result<ExitCode, VmError> 
     );
     if options.tmux {
         command.arg(format!(
-            "{workspace_prefix}; if [ -f /etc/tmux.conf ]; then exec tmux -f /etc/tmux.conf new -A -s main; else exec tmux new -A -s main; fi"
+            "{workspace_prefix}; unset ARGOS_CONNECT_CLIENT; \
+             cfg=/dev/null; if [ -f /etc/tmux.conf ]; then cfg=/etc/tmux.conf; fi; \
+             tmux -u -f \"$cfg\" has-session -t '=main' 2>/dev/null || \
+             tmux -u -f \"$cfg\" new-session -d -s main || \
+             tmux -u -f \"$cfg\" has-session -t '=main' || exit 1; \
+             ARGOS_CONNECT_CLIENT=1 exec tmux -u -N -f \"$cfg\" attach-session -E -t '=main'"
         ));
     } else {
         command.arg(format!(
             "{workspace_prefix}; exec ${{SHELL:-/run/current-system/sw/bin/sh}} -l"
         ));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        let error = command.exec();
-        eprintln!("error: cannot execute ssh: {error}");
-        Ok(ExitCode::from(1))
-    }
-    #[cfg(not(unix))]
-    {
-        let status = command.status().map_err(|error| VmError {
-            code: "shell_error",
-            message: format!("cannot execute ssh: {error}"),
-        })?;
-        Ok(if status.success() {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::from(status.code().unwrap_or(1) as u8)
-        })
-    }
+    Ok(command)
 }
 
 fn wait_for_ready(session: &str, log_path: &Path, id: &str) -> Result<(), VmError> {
@@ -2172,7 +2172,7 @@ fn state_error(message: String) -> VmError {
     }
 }
 
-fn valid_id(value: &str) -> bool {
+pub(crate) fn valid_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value

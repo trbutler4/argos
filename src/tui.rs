@@ -14,7 +14,7 @@ use ratatui::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{self, IsTerminal, Stdout},
+    io::{self, Stdout},
     path::PathBuf,
     process::ExitCode,
     time::Duration,
@@ -25,38 +25,20 @@ pub(crate) fn run(
     config: Option<PathBuf>,
     host: Option<String>,
     local: bool,
+    state_dir: Option<PathBuf>,
 ) -> ExitCode {
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        eprintln!("error: tui requires a terminal on stdin and stdout");
-        return ExitCode::from(1);
-    }
-    let args = TuiArgs {
-        socket,
-        config,
-        host,
-        local,
-        host_only: false,
-    };
-    let request = match snapshot_request(
-        args.socket.clone(),
-        args.config.clone(),
-        args.host.clone(),
-        args.local,
-    ) {
-        Ok(request) => request,
-        Err((message, code)) => {
-            eprintln!("error: {message}");
-            return ExitCode::from(code);
-        }
-    };
-    match run_terminal(App::new(request, args.clone())) {
-        Ok(Some(attach)) => attach_selected(attach),
-        Ok(None) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("error: tui failed: {error}");
-            ExitCode::from(1)
-        }
-    }
+    crate::connect::run(
+        None,
+        sessions::AttachOptions {
+            target: String::new(),
+            socket,
+            config_path: config,
+            host,
+            local,
+            state_dir,
+            vm_shell: false,
+        },
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,7 +47,7 @@ struct TuiArgs {
     config: Option<PathBuf>,
     host: Option<String>,
     local: bool,
-    host_only: bool,
+    state_dir: Option<PathBuf>,
 }
 
 #[cfg(target_os = "linux")]
@@ -76,7 +58,7 @@ pub(crate) enum PickResult {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn pick_host(
+pub(crate) fn pick_session(
     options: &sessions::AttachOptions,
     previous: Option<&sessions::AttachOptions>,
     error: Option<&str>,
@@ -87,7 +69,7 @@ pub(crate) fn pick_host(
         config: options.config_path.clone(),
         host: options.host.clone(),
         local: options.local,
-        host_only: true,
+        state_dir: options.state_dir.clone(),
     };
     let request = snapshot_request(
         args.socket.clone(),
@@ -106,7 +88,7 @@ pub(crate) fn pick_host(
         Some(error) => {
             format!("Connection failed: {error}\nEnter choose | R retry last target | q quit")
         }
-        None => "Origin-side host picker. Enter connect | q quit".into(),
+        None => "Origin-side session picker. Enter connect | q quit".into(),
     });
     if let Some(previous) = previous {
         app.notice.as_mut().unwrap().push_str(&format!(
@@ -156,10 +138,6 @@ struct PendingAttach {
     state_dir: Option<PathBuf>,
 }
 
-fn attach_selected(attach: PendingAttach) -> ExitCode {
-    sessions::attach(attach.into())
-}
-
 impl From<PendingAttach> for sessions::AttachOptions {
     fn from(attach: PendingAttach) -> Self {
         Self {
@@ -169,6 +147,7 @@ impl From<PendingAttach> for sessions::AttachOptions {
             host: attach.host,
             local: attach.local,
             state_dir: attach.state_dir,
+            vm_shell: false,
         }
     }
 }
@@ -194,24 +173,6 @@ impl Drop for TerminalGuard {
         let _ = disable_raw_mode();
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
-    }
-}
-
-fn run_terminal(mut app: App) -> io::Result<Option<PendingAttach>> {
-    let mut terminal = TerminalGuard::enter()?;
-    app.refresh();
-    loop {
-        terminal.terminal.draw(|frame| app.render(frame))?;
-        if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key) = event::read()?
-            && let Some(action) = app.handle_key(key)
-        {
-            drop(terminal);
-            match action {
-                Action::Quit => return Ok(None),
-                Action::Attach(attach) => return Ok(Some(attach)),
-            }
-        }
     }
 }
 
@@ -261,16 +222,14 @@ impl App {
 
     fn refresh(&mut self) {
         self.snapshot = discover_snapshot(&self.request);
-        if !self.args.host_only {
-            match vm::snapshot(None) {
-                Ok(snapshot) => {
-                    self.vm_snapshot = Some(snapshot);
-                    self.vm_error = None;
-                }
-                Err(error) => {
-                    self.vm_snapshot = None;
-                    self.vm_error = Some(error);
-                }
+        match vm::snapshot(self.args.state_dir.clone()) {
+            Ok(snapshot) => {
+                self.vm_snapshot = Some(snapshot);
+                self.vm_error = None;
+            }
+            Err(error) => {
+                self.vm_snapshot = None;
+                self.vm_error = Some(error);
             }
         }
         self.rows = rows(
@@ -305,17 +264,10 @@ impl App {
             .filter(|host| host.error.is_some())
             .count()
             + usize::from(self.vm_error.is_some());
-        self.last_status = if self.args.host_only {
-            format!(
-                "{} hosts, {total_sessions} sessions, {failed} errors",
-                self.snapshot.hosts.len()
-            )
-        } else {
-            format!(
-                "{} hosts, {total_sessions} sessions, {total_vms} vms, {failed} errors",
-                self.snapshot.hosts.len()
-            )
-        };
+        self.last_status = format!(
+            "{} hosts, {total_sessions} sessions, {total_vms} vms, {failed} errors",
+            self.snapshot.hosts.len()
+        );
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
@@ -360,14 +312,14 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(if self.args.host_only { 6 } else { 3 }),
+                Constraint::Length(6),
                 Constraint::Min(3),
                 Constraint::Length(3),
             ])
             .split(area);
 
         let title = Paragraph::new(if let Some(notice) = &self.notice {
-            std::iter::once(Line::from("Argos connect"))
+            std::iter::once(Line::from("Argos sessions"))
                 .chain(notice.lines().map(Line::from))
                 .collect()
         } else {
@@ -493,9 +445,7 @@ fn host_rows(host: &Host, vms: Vec<&vm::VmRecord>, args: &TuiArgs) -> Vec<Row> {
             }));
         }
     }
-    if !args.host_only {
-        rows.extend(vm_section_rows(&host.id, vms, args));
-    }
+    rows.extend(vm_section_rows(&host.id, vms, args));
     rows
 }
 
@@ -570,7 +520,7 @@ fn vm_attach(id: &str, args: &TuiArgs) -> PendingAttach {
         config_path: args.config.clone(),
         host: None,
         local: false,
-        state_dir: None,
+        state_dir: args.state_dir.clone(),
     }
 }
 
@@ -651,7 +601,7 @@ mod tests {
             config: Some(PathBuf::from("config.local.toml")),
             host: None,
             local: false,
-            host_only: false,
+            state_dir: None,
         }
     }
 

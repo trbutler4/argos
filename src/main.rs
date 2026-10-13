@@ -14,6 +14,9 @@ mod config;
 mod connect;
 #[cfg(not(target_os = "linux"))]
 mod connect {
+    pub(crate) fn check_origin() -> Result<(), String> {
+        Err("managed connections currently require Linux".into())
+    }
     pub(crate) fn run(
         _: Option<String>,
         _: crate::sessions::AttachOptions,
@@ -36,9 +39,9 @@ struct Cli {
 }
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Own one host tmux attachment at a time, with an origin-side picker.
+    /// Open the managed session picker or attach to a host/VM target.
     Connect {
-        #[arg(add = ArgValueCandidates::new(completions::host_targets))]
+        #[arg(add = ArgValueCandidates::new(completions::attach_targets))]
         target: Option<String>,
         #[arg(long, conflicts_with_all=["config", "host", "local"], value_hint = ValueHint::FilePath)]
         socket: Option<String>,
@@ -48,6 +51,8 @@ enum Command {
         host: Option<String>,
         #[arg(long, conflicts_with_all=["socket", "config", "host"])]
         local: bool,
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        state_dir: Option<std::path::PathBuf>,
     },
     /// List configured tmux sessions.
     List {
@@ -83,6 +88,8 @@ enum Command {
         host: Option<String>,
         #[arg(long, conflicts_with_all=["socket", "config", "host"])]
         local: bool,
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        state_dir: Option<std::path::PathBuf>,
     },
     /// Host-local helper commands for installed Argos instances.
     Host {
@@ -414,6 +421,7 @@ fn main() -> ExitCode {
             config,
             host,
             local,
+            state_dir,
         } => connect::run(
             target,
             sessions::AttachOptions {
@@ -422,7 +430,8 @@ fn main() -> ExitCode {
                 config_path: config,
                 host,
                 local,
-                state_dir: None,
+                state_dir,
+                vm_shell: false,
             },
         ),
         Command::List {
@@ -454,6 +463,7 @@ fn main() -> ExitCode {
                 host,
                 local,
                 state_dir,
+                vm_shell: false,
             }),
         },
         Command::Tui {
@@ -461,7 +471,8 @@ fn main() -> ExitCode {
             config,
             host,
             local,
-        } => tui::run(socket, config, host, local),
+            state_dir,
+        } => tui::run(socket, config, host, local, state_dir),
         Command::Host { command } => match command {
             HostCommand::Status { json } => host::status(json),
         },

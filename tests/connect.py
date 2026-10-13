@@ -69,7 +69,8 @@ def main():
     terminals = []
     with tempfile.TemporaryDirectory(prefix="argos-connect-", dir=os.environ.get("XDG_RUNTIME_DIR")) as directory:
         root = Path(directory)
-        env = dict(os.environ, TERM="xterm-256color", XDG_CONFIG_HOME=str(root / "config-home"))
+        env = dict(os.environ, TERM="xterm-256color", XDG_CONFIG_HOME=str(root / "config-home"),
+                   ARGOS_STATE_DIR=str(root / "empty-state"))
         for name in ("TMUX", "TMUX_PANE", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "ARGOS_CONNECT_CLIENT"):
             env.pop(name, None)
         actual_ssh = shutil.which("ssh")
@@ -192,9 +193,9 @@ def main():
             peer = terminal("tmux", "-S", str(sockets["a"]), "attach", "-t", ids["a"])
             wait(lambda: len(clients("a")) == 1, "unmanaged peer did not attach")
             peer.send(b"\x1b[24~")
-            wait(lambda: b"Start argos connect" in peer.output, "guard did not show guidance")
+            wait(lambda: b"Start Argos" in peer.output, "guard did not show guidance")
             assert peer.process.poll() is None
-            actor = terminal(*connect, f"host:a:{ids['a']}")
+            actor = terminal(str(BINARY), "sessions", "attach", f"host:a:{ids['a']}", "--config", str(config))
             wait(lambda: len(managed("a")) == 1, "managed SSH client did not attach")
             assert len(clients("a")) == 2
             assert "=1" not in tmux("a", "show-environment", "-t", ids["a"], "ARGOS_CONNECT_CLIENT", check=False)
@@ -213,10 +214,13 @@ def main():
             initial.send(b"\x1b")
             exited(initial)
             for name in ("TMUX", "TMUX_PANE", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
-                rejected = terminal(*connect, f"host:a:{ids['a']}", override={name: "nested"})
-                exited(rejected, 1)
-                assert b"original terminal" in rejected.output
-            for args in (["vm:test"], ["host:a:test"], ["host:a:test", "--socket", str(sockets["a"])]):
+                for args in ([*connect, f"host:a:{ids['a']}"],
+                             [str(BINARY), "sessions", "attach", f"host:a:{ids['a']}", "--config", str(config)],
+                             [str(BINARY), "tui", "--config", str(config)]):
+                    rejected = terminal(*args, override={name: "nested"})
+                    exited(rejected, 1)
+                    assert b"original terminal" in rejected.output
+            for args in (["vm:"], ["host:a:test"], ["host:a:test", "--socket", str(sockets["a"])]):
                 rejected = terminal(str(BINARY), "connect", *args)
                 exited(rejected, 2)
 
@@ -224,7 +228,9 @@ def main():
             # attachment must leave it alive and use a separate SSH process.
             run("ssh", "-M", "-N", "-f", "peer-a")
             run("ssh", "-O", "check", "peer-a")
-            stress = terminal(*connect, f"host:a:{ids['a']}")
+            stress = terminal(str(BINARY), "tui", "--config", str(config))
+            picker(stress)
+            stress.send(b"\r")
             wait(lambda: len(managed("a")) == 1, "stress initial attach failed")
             for iteration in range(int(os.environ.get("ARGOS_SWITCH_COUNT", "100"))):
                 attached_children = children(stress)
@@ -237,7 +243,7 @@ def main():
                 assert not Path(f"/proc/{child_pid}").exists(), "old SSH child survived"
                 destination = "b" if iteration % 2 == 0 else "a"
                 # Inventory sorts a, b, local; the first selectable row is a.
-                stress.send((b"jjj" if destination == "b" else b"") + b"\r")
+                stress.send((b"jjjjj" if destination == "b" else b"") + b"\r")
                 wait(lambda: len(managed(destination)) == 1, "switch did not attach")
                 assert len(children(stress)) == 1
             stress.send(b"\x02d")

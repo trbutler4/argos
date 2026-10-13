@@ -58,7 +58,7 @@ pub(crate) fn attach_targets() -> Vec<CompletionCandidate> {
     candidates
 }
 
-/// Managed connect supports host sessions only, without probing remote hosts.
+/// Host candidates for the shared target completer, without remote probes.
 pub(crate) fn host_targets() -> Vec<CompletionCandidate> {
     let mut candidates = Vec::new();
     if let Ok(Some((config, _))) = config::load_selected(None) {

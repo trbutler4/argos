@@ -1,143 +1,134 @@
 # Single-attachment switching: review guide
 
-Implementation of [PR #1's design outline](https://github.com/trbutler4/argos/pull/1),
-reviewed at `359a0d656d5c49273abc567f990e0d610f02657d`.
+Implements [PR #1's outline](https://github.com/trbutler4/argos/pull/1), with the
+updated requirement that **Argos always owns interactive connections**. The
+original proposal remains historical context, not the current behavior contract.
 
-## Implemented scope
+## Default behavior
 
-`argos connect [TARGET]` owns one interactive host-tmux attachment from the
-original Linux terminal. It supports local tmux and direct SSH to existing
-sessions, with the same inventory and exact target selection as `sessions attach`.
-Without a target it opens a host-only picker. Existing direct attach and TUI
-entry points retain their native behavior.
+`sessions attach`, `tui`, and `connect` share one Linux origin-side supervisor
+and host/VM picker. `vm tmux`, `vm shell`, and the attachment phase of `vm up` /
+`task up` also keep that owner. The direct-exec attachment, implicit same-server
+switch, and remote SSH-window fallback have been removed. Native tmux commands
+can still switch sessions on the current server.
+
+Connection ownership is mandatory. Installing the guarded return-to-picker
+binding is optional and never happens automatically.
 
 | Event | Behavior |
 | --- | --- |
-| Initial picker: Enter | Attach to selected host session |
+| Initial picker: Enter | Attach to selected host or VM session |
 | Initial picker: Escape / q | Exit to shell |
-| Managed attachment: guarded F12 | Detach invoking client, reap transport, open origin picker |
+| Guarded F12 in tmux | Detach invoking client, reap transport, open origin picker |
 | Return picker: Enter | Attach selected target |
 | Return picker: Escape / Shift-R | Reconnect last Argos-selected target |
 | Picker: q / Ctrl-C | Exit (Ctrl-C returns 130) |
-| Native tmux detach | Exit managed mode to shell |
-| Connection or target failure | Show error, selection, retry with Shift-R, and quit |
-| Origin INT / TERM / HUP | Terminate owned attachment, restore terminal, exit 128 + signal |
+| Native tmux detach | Exit Argos to shell |
+| Connection or target failure | Show error, selection, retry, and quit |
+| Origin INT / TERM / HUP | Clean up owned attachment and exit 128 + signal |
+| Detectable nested tmux/SSH entry | Reject before opening another connection |
+| Nested VM/task up | Reject before mutation unless --no-attach / --json |
 
-### Decisions relative to the proposal
+Escape reconnects the last **Argos-selected** target, using the resolved host
+tmux session ID or VM ID. Native same-server switches do not update that target;
+the picker states this. Selection disconnects first, so cancellation needs a
+new connection and can fail.
 
-- **Cancel reconnects the last Argos-selected target**, using its resolved tmux
-  session ID. A native same-server `switch-client` does not update that target.
-  The return picker states this explicitly. A fixed exit status cannot convey
-  the last visible session, so this version does not claim to track it.
-- **The limit covers interactive attachments.** Read-only discovery can use
-  bounded concurrent probes between attachments. All probes finish before the
-  next interactive child starts; there is no discovery during attachment.
-- **Host-only, Linux-only, direct SSH.** VM targets are rejected. ProxyCommand
-  and ProxyJump are detected using `ssh -G` and rejected before connection.
-  Cleared environment variables cannot prove that an ancestor SSH/tmux chain
-  does not exist; detectable nesting is rejected, not adopted.
-- **Disconnect before picking.** Escape needs a new connection and may fail.
-  Errors return to recovery UI instead of automatically retrying in a loop.
+VM shell is supervised plain SSH, not tmux. It has no return-binding marker;
+a normal shell exit returns to the caller. A shell exit of 78 is not interpreted
+as a picker request.
 
 ## Code map
 
-- `src/main.rs`: `connect [TARGET]` and inventory-selection flags.
-- `src/sessions.rs`: shared exact selection and command construction; managed
-  target validation, client marker, transport policy, and reconnect ID.
-- `src/connect.rs`: origin loop, native foreground process-group handoff,
-  signal handling, child reaping, and terminal restoration.
-- `src/tui.rs`: host-only selection using the existing browser model; distinct
-  retry/quit outcomes, visible recovery message, no VM state reads in this mode.
-- `src/completions.rs`: host-only candidates for `connect`, without remote probes.
+- `src/main.rs`: command aliases and inventory/state selection.
+- `src/sessions.rs`: target parsing/validation and native command preparation;
+  it never replaces Argos or creates an SSH window in another tmux session.
+- `src/connect.rs`: owner loop, foreground process groups, signals, cleanup,
+  child reaping, and terminal restoration.
+- `src/tui.rs`: one host/VM picker with retry/quit outcomes and recovery errors.
+- `src/vm.rs`: guest SSH preparation, unmarked guest tmux bootstrap, and the
+  origin check before VM/task up mutation.
 - `examples/connect.tmux.conf`: optional guarded F12 binding, also installed at
   `$out/share/argos/connect.tmux.conf` by the Nix package.
-- `tests/connect.py`: disposable PTY/tmux/sshd lifecycle and stress checks.
+- `tests/connect.py`: default-TUI switching stress and PTY/SSH lifecycle checks.
+- `tests/vm_connect.py`: opt-in real QEMU/KVM guest connection acceptance.
 
-## Client identification and binding
+## Client identification
 
-Managed tmux clients receive `ARGOS_CONNECT_CLIENT=1` in their own process
-environment. The Linux binding reads `/proc/#{client_pid}/environ` with GNU
-`grep -zqx`, using tmux's invoking-client context. A marker on one client does
-not authorize detaching another client on the same session. Missing or unreadable
-markers show guidance and leave the client attached. This is a UX guard, not an
-authentication boundary against processes running as the same user.
+Only an attaching tmux client receives `ARGOS_CONNECT_CLIENT=1`. The Linux
+binding reads `/proc/#{client_pid}/environ` using GNU `grep -zqx` and tmux's
+invoking-client context. Missing/unreadable markers show guidance without
+detaching. This distinguishes clients sharing a session, not users or trust
+boundaries: processes running as the same user can forge the marker.
 
-Managed attach uses tmux `-E` so the marker is not copied through a customized
-`update-environment` list into shared session state. This also means managed
-attach does not refresh other session environment variables. No server options,
-hooks, or keybindings are installed by `connect` itself.
+Attach uses tmux `-E` to keep the marker out of a customized `update-environment`
+list. Consequently, other session environment variables are not refreshed on
+attach. Guest tmux is created with the marker unset before starting its marked
+client, so a new guest server and its panes do not inherit the marker.
 
-The opt-in binding runs only the fixed `detach-client -E 'exit 78'` action.
-It never puts destination names into shell code or launches another connection
-on the destination host. Only managed mode interprets 78 as a picker request.
+The binding runs the fixed action `detach-client -E 'exit 78'`. Destination
+names never become executable handoff commands. Only tmux attachments interpret
+78 as a picker request.
 
-## Ownership and terminal details
+## Ownership and limits
 
-Each attachment inherits native terminal I/O in a new foreground process group.
-Argos remains in its original group. `waitid` observes child completion without
-reaping the group leader; cleanup can therefore signal the owned group without
-PID-reuse ambiguity. The old group is cleaned up and its leader reaped before
-the picker can start another attachment. tmux servers and their panes are outside
-this group and persist.
+Each attachment runs with inherited terminal I/O in its own foreground process
+group. Argos stays in its original group. `waitid` observes completion without
+reaping the group leader, preventing PID reuse while signalling that group.
+The old group is cleaned up and reaped before the next picker or attachment.
+tmux servers and panes remain outside the owned attachment group.
 
-Catchable origin termination gets a bounded grace period, then forced cleanup.
-The origin restores its foreground group, saved terminal attributes, and native
-display modes. `SIGTTOU` is blocked only while handing off the foreground group.
-Stopped clients suspend the origin too; `fg` resumes the same attachment. This
-uses safe `nix` and `signal-hook` APIs, with no application `unsafe` code.
+Catchable termination has a bounded grace period before forced cleanup. Argos
+restores foreground ownership, terminal attributes, and display modes. TTOU is
+blocked only during foreground handoff. Stopped clients suspend the origin;
+`fg` resumes the same attachment. All application code uses safe Rust APIs.
 
-Managed SSH disables ControlMaster, ControlPath, ControlPersist, agent and port
-forwarding, local commands, background-after-authentication, and SSH escape
-commands. Strict host-key checking and batch authentication remain enabled.
-ConnectTimeout bounds connection setup; keepalives detect dead links without
-imposing a duration limit on a healthy attachment. Unrelated masters remain alive.
+All interactive SSH disables connection sharing/persistence, agent and port
+forwarding, local commands, background authentication, and SSH escape commands.
+Strict host-key checking and batch authentication stay enabled. Setup deadlines
+and keepalives do not limit the lifetime of a healthy attachment. VM trust retains
+the existing first-use enrollment model but never overwrites a recorded key
+during reconnect; changed or invalid recorded keys fail SSH verification.
 
-SIGKILL of the origin cannot run cleanup. Arbitrary daemonizing SSH configuration
-helpers and custom wrappers that escape the owned process group are outside the
-tested ownership contract. Proxies/jump hosts remain explicitly unsupported.
+Supported: Linux origins and destinations, direct SSH host sessions, local VM
+tmux and shells. ProxyCommand/ProxyJump configurations are explicitly rejected.
+Read-only discovery may probe hosts concurrently between attachments; probes
+finish before attaching. Clearing nesting variables cannot establish that no
+ancestor transport exists. SIGKILL cannot run origin cleanup, and arbitrary
+daemonizing custom SSH helpers are outside the tested ownership contract.
 
-## Validation and remaining human checks
+## Validation
 
-Validated with the pinned Linux development shell, tmux 3.7c and OpenSSH 10.5p1:
+Pinned Linux development shell: tmux 3.7c, OpenSSH 10.5p1.
 
-- Formatting, all 35 Rust tests, Clippy with `--all-targets -- -D warnings`,
-  locked build, and every contributor-required Python integration script passed.
-- `nix build .# --no-link` passed. The packaged binary and installed binding also
-  passed `tests/connect.py`, including the full 100-switch run.
+All checks below passed, including 32 Rust tests, the Nix package build, the
+packaged binary/binding running the full 100-switch TUI test, and real VM acceptance.
 
-- Local and SSH return-status propagation, native detach, and two-client isolation.
-- Guarded binding on managed and unmanaged clients sharing a session, including
-  a customized tmux environment-update list.
-- Initial cancel, reconnect-on-cancel, explicit quit, failed-target retry and
-  choosing another target; native same-server switching followed by cancel.
-- 100 alternating switches between two logical remote hosts on an isolated
-  loopback sshd, with separate tmux sockets. Each iteration checks one owned
-  attachment child and disappearance of the previous SSH process before selection.
-- Local-to-remote switching, unchanged pane PIDs, and preservation of a second
-  attached client and an unrelated fixture-owned SSH master.
-- Resize, origin INT/TERM/HUP, local and remote suspend/resume, and real interactive
-  Bash job control using tmux's native suspend binding and `fg`.
-- Bracketed paste through SSH and Ctrl-C reaching the remote pane without
-  terminating the origin-side owner.
-- Forced SSH transport loss and recovery; host-key and authentication failures;
-  proxy rejection before the configured proxy command executes.
+- Rust formatting, tests, Clippy, locked build, and contributor Python scripts.
+- Real local/SSH PTYs: default `sessions attach` retains its owner, nested pane
+  entry fails without opening windows, and unrelated clients/panes survive.
+- 100 switches through normal `tui` between two logical loopback SSH hosts;
+  each iteration checks one attachment child, reaping before selection, and
+  preservation of an unrelated fixture-owned SSH master.
+- Cancel/retry/quit, failed targets, host-key/authentication failures, proxy
+  rejection, transport loss, resize, bracketed paste, Ctrl-C, signals, and
+  real Bash suspend/resume job control.
+- A disposable QEMU/KVM VM: guest bootstrap marker isolation, VM tmux/shell and
+  sessions entry, host/VM switching through TUI, reconnect, pane persistence,
+  pinned guest trust, and cleanup. Generated credentials and isolated
+  HOME/state/tmux servers prevent using personal credentials or sessions.
 
-The full automated check command is in README. Physical-host latency and a real
-terminal's clipboard integration still need human acceptance. Tests use disposable
-host sessions rather than VMs because VM transport is outside this feature's scope.
-No physical host inventory was used for connections or configuration activation.
+Commands live in README. `tests/vm_connect.py` boots a VM and must only be run
+with permission; it stops and removes its own fixture. Physical-host latency,
+real-terminal clipboard integration, and daily-use UX remain human acceptance.
 
-### Human review path
+## Human review path
 
-1. Read the cancel rule and ownership limits above; review `src/connect.rs` and
-   `examples/connect.tmux.conf` first.
-2. From a plain terminal, create disposable tmux sessions on chosen hosts and
-   select them with `argos connect --config /path/to/private-inventory.toml`.
-3. Review the destination's current F12 binding, then explicitly source the
-   example on the disposable tmux server or choose a different unused key.
-4. Switch between hosts, press Escape to reconnect, then test normal detach,
-   connection failure, resize, paste, clipboard, and native suspend/resume.
-5. Confirm working processes survive and another client remains attached.
-   Update downstream package pins and live bindings only after accepting this UX.
-
-No downstream configuration is activated by this change.
+1. Review `src/connect.rs`, the session/VM command builders, and the binding.
+2. Start `argos tui --config /path/to/private-inventory.toml` in a plain terminal.
+   Try both host and VM rows and the `sessions attach` / `vm tmux` aliases.
+3. Review existing F12 bindings before explicitly sourcing the example on
+   disposable destination servers, or select a different unused key.
+4. Switch, cancel, detach, resize, paste, test clipboard, and suspend/resume.
+5. Confirm work and other clients survive. Update downstream pins and live
+   bindings only after accepting the UX. This change performs no activation.

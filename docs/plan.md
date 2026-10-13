@@ -64,6 +64,11 @@ M0a has a working CLI path for discovery and a separate sessions layer for termi
 
 ### Slice 3: sessions attach layer
 
+The direct-attach and nested-switch behavior recorded in this historical slice
+has been replaced by mandatory origin-side ownership. See the
+[connection review guide](single-attachment-implementation.md) for the current
+host/VM entry contract and validation.
+
 Implemented interface: `argos sessions list` for explicit host-tmux discovery and
 `argos sessions attach TARGET` for terminal entry. Targets are typed at the edge:
 `host:<host>:<session>` or `SESSION --host HOST` routes to unmanaged host tmux,
@@ -209,9 +214,9 @@ Acceptance on the user's real machines:
 - **A02:** Enter a disposable session on each relevant host, including host tmux and VM-owned tmux. Record shell/process PID,
   run a counter, switch away and reconnect. Same remote process remains alive and
   the counter advanced. Removing only the SSH client must not kill the session.
-- **A03:** Run `sessions attach` inside and outside host tmux. Host targets connect
-  to unmanaged host tmux; VM targets connect to guest-owned tmux. Prefix forwarding, resize and terminal
-  cleanup work. Repeat through the TUI once TUI launch is added.
+- **A03:** Run `sessions attach` and `tui` from a plain origin terminal; host and
+  VM targets retain the same connection owner. Nested tmux/SSH entry is rejected
+  before creating another connection. Resize, picker return, and terminal cleanup work.
 - **A04:** Test an unreachable host, an authentication error, an untrusted host key,
   missing tmux and zero sessions. Each is distinct, and a bad host cannot freeze
   CLI completion or hide successful results from other hosts. JSON partial results
@@ -386,8 +391,8 @@ Not blockers for writing this scope:
 
 Implementation of PR #1's origin-side session switching is tracked in
 [Single-attachment implementation](single-attachment-implementation.md), including
-the host-only `connect` loop, guarded client identification, real PTY/SSH lifecycle
-and stress evidence, and remaining human acceptance checks.
+mandatory connection ownership across host/TUI/VM entry, guarded client
+identification, real PTY/SSH and microVM evidence, and remaining human acceptance checks.
 
 Unit tests may check parsers, quoting, operation transitions and port selection, but
 must not substitute for the real SSH/tmux/VM/browser checks above. Use disposable test

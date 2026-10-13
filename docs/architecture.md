@@ -54,8 +54,8 @@ details, search/filter and a contextual action/help bar. M0b needs keyboard
 navigation, live reachability status, readable errors and a clear sessions-layer
 entry flow. Support terminal resizing
 and a usable compact layout. Specific widgets and keybindings remain design choices.
-A slow host probe must not block input or redraws. The TUI may run in a tmux window
-or be launched in a sufficiently large popup, but the popup is not the product itself.
+A slow host probe must not block input or redraws. The managed TUI runs in the
+original terminal outside tmux and SSH, and attachments return to that picker.
 
 ## 2. Machine inventory and remote discovery
 
@@ -91,25 +91,26 @@ from attachable entry points:
   `tmux new -A -s main`.
 - `argos sessions attach host:HOST:SESSION` enters unmanaged host tmux and must not
   imply Argos owns that session's lifecycle.
-- Host tmux may wrap the terminal, but it is not the project session owner for VM work.
+- Host tmux is independent of guest tmux, not a transport wrapper or project session owner for VM work.
 - The TUI shows host session rows and VM rows separately and dispatches Enter through
   the same sessions layer.
 - Keep an easy route back to the hub/picker and label VM sessions with their host/project.
 - Disconnecting or closing a tmux client must not kill sessions or restart shells.
 
 Preserve the user's existing tmux prefix, pane navigation and clipboard bindings.
-Remote tmux may be nested under local tmux, so prefix forwarding, returning to the
-hub, OSC 52 clipboard and resize need real tests rather than assumptions.
+Argos entry from inside tmux or SSH is rejected instead of nesting another client.
+Returning to the origin picker, OSC 52 clipboard and resize need real tests rather
+than assumptions.
 
 If two clients join the same session, accept tmux's native behavior and make
 it visible. Do not mistake multiple clients for duplicate environments.
 
-For a single interactive attachment without nesting, Linux `argos connect`
-retains an origin-side owner and uses the existing sessions layer's target and
-command preparation. A guarded destination binding exits only its managed client
-with status 78; the owner reaps the transport before opening a host-only picker.
-Cancel reconnects the last Argos-selected target. This path supports local tmux
-and direct SSH host sessions, with VM and proxy/jump transports excluded for now.
+Every interactive entry retains the Linux origin-side owner: `sessions attach`,
+`tui`, `connect`, VM tmux/shell, and VM/task up attachment. A guarded destination
+binding exits only its managed tmux client with status 78; the owner reaps the
+transport before opening the shared host/VM picker. Cancel reconnects the last
+Argos-selected target. Local tmux, direct SSH host sessions, and local VM guest
+SSH are supported; proxy/jump transports remain excluded.
 See the [implementation review guide](single-attachment-implementation.md) for
 client identification, foreground process groups, lifecycle tests, and remaining
 human acceptance checks.

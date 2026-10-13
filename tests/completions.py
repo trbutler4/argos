@@ -157,7 +157,7 @@ def main():
         assert "host:alpha:" in targets and "host:beta:" in targets, targets
         managed = complete(env, "connect", "")
         assert "host:alpha:" in managed and "host:beta:" in managed, managed
-        assert "vm:web" not in managed and "vm:api" not in managed, managed
+        assert "vm:web" in managed and "vm:api" in managed, managed
 
         # Prefixes filter, and remote hosts are never probed for sessions.
         assert complete(env, "sessions", "attach", "vm:w") == ["vm:web"]
