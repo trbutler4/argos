@@ -1,4 +1,4 @@
-use crate::{config, tmux::process};
+use crate::{config, process};
 use serde::{Deserialize, Serialize};
 use std::{
     env,
@@ -270,6 +270,10 @@ fn run_error(error: process::RunError) -> HostStatusError {
         process::RunError::Timeout => HostStatusError {
             code: "timeout".into(),
             message: "host status check timed out".into(),
+        },
+        process::RunError::Cancelled => HostStatusError {
+            code: "cancelled".into(),
+            message: "host status cancelled".into(),
         },
         process::RunError::OutputLimit => HostStatusError {
             code: "output_limit".into(),

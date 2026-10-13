@@ -23,8 +23,8 @@ def run(*args, env=None):
 def main():
     assert BINARY.is_file(), "Run cargo build --locked first"
     env = dict(os.environ, TERM="xterm-256color")
-    env.pop("TMUX", None)
-    env.pop("TMUX_PANE", None)
+    for name in ("TMUX", "TMUX_PANE", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
+        env.pop(name, None)
     help_result = run(str(BINARY), "tui", "--help", env=env)
     assert help_result.returncode == 0 and "--config" in help_result.stdout
     non_tty = run(str(BINARY), "tui", "--local", env=env)
@@ -78,7 +78,7 @@ def main():
             while time.monotonic() < deadline:
                 drain(master, output)
                 text = output.decode(errors="ignore")
-                if all(token in text for token in ("Argos", "sessions", "vms", "Test", "VM", "Enter", "attach", "refresh", "quit")):
+                if all(token in text for token in ("Argos", "sessions", "vms", "Test", "VM", "Enter", "attach", "refresh", "quit", "READY")):
                     return
                 time.sleep(0.05)
             raise AssertionError(output.decode(errors="ignore"))
@@ -96,10 +96,14 @@ def main():
             deadline = time.monotonic() + 4
             while time.monotonic() < deadline:
                 drain(master, output)
-                if clients().get(str(process.pid)) == name:
+                if name in clients().values():
                     break
                 time.sleep(0.05)
-            assert clients().get(str(process.pid)) == name, "Enter did not attach selected host tmux session"
+            attached = clients()
+            assert name in attached.values(), "Enter did not attach selected host tmux session"
+            assert str(process.pid) not in attached, "TUI replaced the connection owner"
+            child_pids = Path(f"/proc/{process.pid}/task/{process.pid}/children").read_text().split()
+            assert set(attached) == set(child_pids), "attachment not owned by Argos"
             os.write(master, b"\x02d")
             deadline = time.monotonic() + 4
             while time.monotonic() < deadline and process.poll() is None:
@@ -143,7 +147,7 @@ def main():
 
         run(*tmux, "kill-server", env=env)
     print("PASS: real PTY TUI renders host sessions and VMs, handles navigation/refresh/quit,")
-    print("      exits before attach handoff, and restores terminal mode.")
+    print("      retains ownership during attach, and restores terminal mode.")
 
 
 if __name__ == "__main__":

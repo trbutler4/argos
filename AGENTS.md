@@ -16,7 +16,15 @@ profile, and optional guest tmux config from `[vm.guest_tmux]`. `vm start`/`vm
 stop` run the local microVM process from that state, `vm show` reports packages
 and loopback links, and `vm shell`/`vm tmux` SSH into the guest. Sessions are
 entry points: `sessions attach host:<host>:<session>` enters unmanaged host tmux,
-while `sessions attach vm:<id>` enters guest-owned tmux. `examples/config.toml`
+while `sessions attach vm:<id>` enters guest-owned tmux. All interactive entry
+(`sessions attach`, `tui`, `connect`, VM tmux/shell, and VM/task up attachment)
+uses the Linux origin-side connection owner. Host and VM tmux share one picker;
+nested entry and SSH proxy/jump hosts are rejected. The guarded return binding
+is opt-in, but connection ownership is always on.
+Picker discovery streams results through one cancellable refresh job, keeps
+input responsive, and joins all probes before attachment. VM persisted state and
+guest SSH preparation are separated into `src/vm/state.rs` and `src/vm/guest.rs`.
+`examples/config.toml`
 is active inventory schema, while `examples/environment-proposal.toml` is a
 future proposal. Do not mark implementation milestones complete from
 documentation checks.
@@ -57,7 +65,9 @@ documentation checks.
   `python3 tests/vm_list.py`, `python3 tests/local_tmux.py`,
   `python3 tests/config_cli.py`, `python3 tests/remote_ssh.py`,
   `python3 tests/attach_tmux.py`, `python3 tests/remote_attach.py`,
-  `python3 tests/tui.py`, and `python3 tests/completions.py`.
+  `python3 tests/connect.py`, `python3 tests/tui.py`, and `python3 tests/completions.py`.
+  With explicit permission to boot a disposable local VM, also run
+  `python3 tests/vm_connect.py` for real guest attachment/switching acceptance.
 
 ## Public repository boundary
 

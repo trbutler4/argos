@@ -1,5 +1,4 @@
-#[path = "process.rs"]
-pub(crate) mod process;
+use crate::process;
 
 use serde::Serialize;
 #[cfg(unix)]
@@ -20,10 +19,31 @@ pub struct TmuxError {
     pub message: String,
 }
 
+impl std::fmt::Display for TmuxError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+impl std::error::Error for TmuxError {}
+
 pub fn discover(
     socket: Option<&str>,
     ssh_alias: Option<&str>,
     timeout: Duration,
+) -> Result<Vec<Session>, TmuxError> {
+    discover_cancellable(
+        socket,
+        ssh_alias,
+        timeout,
+        &process::Cancellation::default(),
+    )
+}
+
+pub(crate) fn discover_cancellable(
+    socket: Option<&str>,
+    ssh_alias: Option<&str>,
+    timeout: Duration,
+    cancel: &process::Cancellation,
 ) -> Result<Vec<Session>, TmuxError> {
     if ssh_alias.is_none()
         && let Some(path) = socket
@@ -89,7 +109,7 @@ pub fn discover(
             )
         };
         command.arg(script);
-        process::run(command, deadline).map_err(|e| run_error(e, "ssh"))?
+        process::run_cancellable(command, deadline, cancel).map_err(|e| run_error(e, "ssh"))?
     } else {
         let mut command = Command::new("tmux");
         command.args(["-u", "-N"]);
@@ -103,7 +123,7 @@ pub fn discover(
                 "#{session_id}|#{session_windows}|#{session_attached}|#{session_name}",
             ])
             .env("LC_ALL", "C");
-        process::run(command, deadline).map_err(|e| run_error(e, "tmux"))?
+        process::run_cancellable(command, deadline, cancel).map_err(|e| run_error(e, "tmux"))?
     };
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -251,6 +271,10 @@ fn run_error(error: process::RunError, tool: &str) -> TmuxError {
         process::RunError::Timeout => TmuxError {
             code: "timeout".into(),
             message: format!("{tool} discovery timed out"),
+        },
+        process::RunError::Cancelled => TmuxError {
+            code: "cancelled".into(),
+            message: format!("{tool} discovery cancelled"),
         },
         process::RunError::OutputLimit => TmuxError {
             code: "output_limit".into(),

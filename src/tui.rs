@@ -1,4 +1,6 @@
-use crate::{Host, Snapshot, SnapshotRequest, discover_snapshot, sessions, snapshot_request, vm};
+use crate::discovery::{RefreshJob, Update, observed_now};
+use crate::sessions::{BrowseOptions, GuestMode, HostLocation, SessionTarget};
+use crate::{Host, Snapshot, SnapshotRequest, vm};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
@@ -14,175 +16,250 @@ use ratatui::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{self, IsTerminal, Stdout},
-    path::PathBuf,
-    process::ExitCode,
+    io::{self, Stdout},
+    sync::mpsc::TryRecvError,
     time::Duration,
 };
 
-pub(crate) fn run(
-    socket: Option<String>,
-    config: Option<PathBuf>,
-    host: Option<String>,
-    local: bool,
-) -> ExitCode {
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        eprintln!("error: tui requires a terminal on stdin and stdout");
-        return ExitCode::from(1);
-    }
-    let args = TuiArgs {
-        socket,
-        config,
-        host,
-        local,
-    };
-    let request = match snapshot_request(
-        args.socket.clone(),
-        args.config.clone(),
-        args.host.clone(),
-        args.local,
-    ) {
-        Ok(request) => request,
-        Err((message, code)) => {
-            eprintln!("error: {message}");
-            return ExitCode::from(code);
+#[cfg(target_os = "linux")]
+pub(crate) enum PickResult {
+    Select(SessionTarget),
+    Retry,
+    Quit(u8),
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn pick_session(
+    request: SnapshotRequest,
+    options: &BrowseOptions,
+    previous: Option<&SessionTarget>,
+    error: Option<&str>,
+    owner: &mut crate::terminal::TerminalOwner,
+) -> io::Result<PickResult> {
+    let mut app = App::new(request, options.clone());
+    let mut notice = match error {
+        Some(error) => {
+            format!("Connection failed: {error}\nEnter choose | R retry last target | q quit")
         }
+        None => "Origin-side session picker. Enter connect | q quit".into(),
     };
-    match run_terminal(App::new(request, args.clone())) {
-        Ok(Some(attach)) => attach_selected(attach),
-        Ok(None) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("error: tui failed: {error}");
-            ExitCode::from(1)
+    if let Some(previous) = previous {
+        notice.push_str(&format!(
+            "\nEsc reconnects last Argos-selected target: {:?} (not native tmux switches)",
+            previous.to_string()
+        ));
+    }
+    app.notice = Some(notice);
+    app.rebuild_rows();
+    let mut terminal = TerminalGuard::enter()?;
+    let mut job = Some(RefreshJob::start(
+        app.request.clone(),
+        app.args.state_dir.clone(),
+    )?);
+    let mut refresh_pending = false;
+    loop {
+        if let Some(code) = owner.poll_idle()? {
+            return Ok(PickResult::Quit(code));
+        }
+        // Bounded updates per frame keep input responsive with many fast hosts.
+        for _ in 0..16 {
+            let Some(active) = &job else { break };
+            match active.try_recv() {
+                Ok(Update::Finished) => {
+                    job.take().expect("active refresh").stop()?;
+                    app.finish_refresh();
+                    if refresh_pending {
+                        refresh_pending = false;
+                        app.begin_refresh();
+                        job = Some(RefreshJob::start(
+                            app.request.clone(),
+                            app.args.state_dir.clone(),
+                        )?);
+                    }
+                    break;
+                }
+                Ok(update) => app.apply(update),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    job.take().expect("active refresh").stop()?;
+                    return Err(io::Error::other(
+                        "discovery worker stopped without completing",
+                    ));
+                }
+            }
+        }
+        terminal.terminal.draw(|frame| app.render(frame))?;
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+        {
+            match key.code {
+                KeyCode::Char('q') => return Ok(PickResult::Quit(0)),
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Ok(PickResult::Quit(130));
+                }
+                KeyCode::Esc | KeyCode::Char('R') => {
+                    return Ok(if previous.is_some() {
+                        PickResult::Retry
+                    } else {
+                        PickResult::Quit(0)
+                    });
+                }
+                _ => match app.handle_key(key) {
+                    Some(Action::Attach(attach)) => return Ok(PickResult::Select(attach)),
+                    Some(Action::Refresh) => {
+                        if job.is_some() {
+                            refresh_pending = true;
+                        } else {
+                            app.begin_refresh();
+                            job = Some(RefreshJob::start(
+                                app.request.clone(),
+                                app.args.state_dir.clone(),
+                            )?);
+                        }
+                    }
+                    _ => {}
+                },
+            }
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TuiArgs {
-    socket: Option<String>,
-    config: Option<PathBuf>,
-    host: Option<String>,
-    local: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PendingAttach {
-    target: String,
-    socket: Option<String>,
-    config_path: Option<PathBuf>,
-    host: Option<String>,
-    local: bool,
-    state_dir: Option<PathBuf>,
-}
-
-fn attach_selected(attach: PendingAttach) -> ExitCode {
-    sessions::attach(sessions::AttachOptions {
-        target: attach.target,
-        socket: attach.socket,
-        config_path: attach.config_path,
-        host: attach.host,
-        local: attach.local,
-        state_dir: attach.state_dir,
-    })
 }
 
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    _screen: ScreenGuard,
 }
 
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
-        let backend = CrosstermBackend::new(stdout);
+        let screen = ScreenGuard::enter()?;
+        let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
-        Ok(Self { terminal })
+        Ok(Self {
+            terminal,
+            _screen: screen,
+        })
     }
 }
 
-impl Drop for TerminalGuard {
+// Own modes before fallible backend initialization, so partial setup rolls back.
+struct ScreenGuard;
+
+impl ScreenGuard {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        let guard = Self;
+        execute!(io::stdout(), EnterAlternateScreen)?;
+        Ok(guard)
+    }
+}
+
+impl Drop for ScreenGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
-        let _ = self.terminal.show_cursor();
-    }
-}
-
-fn run_terminal(mut app: App) -> io::Result<Option<PendingAttach>> {
-    let mut terminal = TerminalGuard::enter()?;
-    app.refresh();
-    loop {
-        terminal.terminal.draw(|frame| app.render(frame))?;
-        if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key) = event::read()?
-            && let Some(action) = app.handle_key(key)
-        {
-            drop(terminal);
-            match action {
-                Action::Quit => return Ok(None),
-                Action::Attach(attach) => return Ok(Some(attach)),
-            }
-        }
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
     Quit,
-    Attach(PendingAttach),
+    Refresh,
+    Attach(SessionTarget),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Row {
     host: String,
-    attach: Option<PendingAttach>,
+    attach: Option<SessionTarget>,
     label: String,
 }
 
 struct App {
     request: SnapshotRequest,
-    args: TuiArgs,
+    args: BrowseOptions,
     snapshot: Snapshot,
     vm_snapshot: Option<vm::VmSnapshot>,
     vm_error: Option<String>,
     rows: Vec<Row>,
     selected: usize,
     last_status: String,
+    notice: Option<String>,
+    loading: bool,
+    preserve_selection: bool,
 }
 
 impl App {
-    fn new(request: SnapshotRequest, args: TuiArgs) -> Self {
+    fn new(request: SnapshotRequest, args: BrowseOptions) -> Self {
+        let hosts = request
+            .machines
+            .iter()
+            .map(|target| Host {
+                id: target.id.clone(),
+                status: "loading",
+                sessions: Vec::new(),
+                error: None,
+            })
+            .collect();
         Self {
             request,
             args,
             snapshot: Snapshot {
                 schema_version: 1,
                 observed_at_unix_ms: 0,
-                hosts: Vec::new(),
+                hosts,
             },
             vm_snapshot: None,
             vm_error: None,
             rows: Vec::new(),
             selected: 0,
             last_status: "loading".into(),
+            notice: None,
+            loading: true,
+            preserve_selection: false,
         }
     }
 
-    fn refresh(&mut self) {
-        self.snapshot = discover_snapshot(&self.request);
-        match vm::snapshot(None) {
-            Ok(snapshot) => {
+    fn begin_refresh(&mut self) {
+        self.loading = true;
+        for host in &mut self.snapshot.hosts {
+            host.status = "refreshing";
+        }
+        self.rebuild_rows();
+    }
+
+    fn finish_refresh(&mut self) {
+        self.loading = false;
+        self.snapshot.observed_at_unix_ms = observed_now();
+        self.rebuild_rows();
+    }
+
+    fn apply(&mut self, update: Update) {
+        match update {
+            Update::Host(host) => {
+                if let Some(slot) = self.snapshot.hosts.iter_mut().find(|old| old.id == host.id) {
+                    *slot = host;
+                }
+            }
+            Update::Vms(Ok(snapshot)) => {
                 self.vm_snapshot = Some(snapshot);
                 self.vm_error = None;
             }
-            Err(error) => {
+            Update::Vms(Err(error)) => {
+                self.vm_error = Some(error.to_string());
                 self.vm_snapshot = None;
-                self.vm_error = Some(error);
             }
+            Update::Finished => unreachable!("job completion is handled by the picker"),
         }
+        self.rebuild_rows();
+    }
+
+    fn rebuild_rows(&mut self) {
+        let selected_target = self
+            .rows
+            .get(self.selected)
+            .and_then(|row| row.attach.as_ref())
+            .cloned();
         self.rows = rows(
             &self.snapshot,
             self.vm_snapshot.as_ref(),
@@ -190,10 +267,19 @@ impl App {
             &self.args,
         );
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
-        if self
-            .rows
-            .get(self.selected)
-            .is_none_or(|row| row.attach.is_none())
+        if self.preserve_selection
+            && let Some(index) = selected_target.and_then(|target| {
+                self.rows
+                    .iter()
+                    .position(|row| row.attach.as_ref() == Some(&target))
+            })
+        {
+            self.selected = index;
+        } else if (!self.preserve_selection
+            || self
+                .rows
+                .get(self.selected)
+                .is_none_or(|row| row.attach.is_none()))
             && let Some(index) = self.rows.iter().position(|row| row.attach.is_some())
         {
             self.selected = index;
@@ -216,7 +302,12 @@ impl App {
             .count()
             + usize::from(self.vm_error.is_some());
         self.last_status = format!(
-            "{} hosts, {total_sessions} sessions, {total_vms} vms, {failed} errors",
+            "{} | {} hosts, {total_sessions} sessions, {total_vms} vms, {failed} errors",
+            if self.loading {
+                "refreshing (earlier rows may be stale)"
+            } else {
+                "READY"
+            },
             self.snapshot.hosts.len()
         );
     }
@@ -233,16 +324,21 @@ impl App {
                 .and_then(|row| row.attach.clone())
                 .map(Action::Attach),
             KeyCode::Down | KeyCode::Char('j') => {
+                self.preserve_selection = true;
                 self.move_down();
                 None
             }
             KeyCode::Up | KeyCode::Char('k') => {
+                self.preserve_selection = true;
                 self.move_up();
                 None
             }
             KeyCode::Char('r') => {
-                self.refresh();
-                None
+                self.preserve_selection = self
+                    .rows
+                    .get(self.selected)
+                    .is_some_and(|row| row.attach.is_some());
+                Some(Action::Refresh)
             }
             _ => None,
         }
@@ -263,21 +359,27 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),
+                Constraint::Length(6),
                 Constraint::Min(3),
                 Constraint::Length(3),
             ])
             .split(area);
 
-        let title = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "Argos",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" sessions and VMs"),
-        ]))
+        let title = Paragraph::new(if let Some(notice) = &self.notice {
+            std::iter::once(Line::from("Argos sessions"))
+                .chain(notice.lines().map(Line::from))
+                .collect()
+        } else {
+            vec![Line::from(vec![
+                Span::styled(
+                    "Argos",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" sessions and VMs"),
+            ])]
+        })
         .block(Block::default().borders(Borders::ALL))
         .wrap(Wrap { trim: true });
         frame.render_widget(title, chunks[0]);
@@ -303,7 +405,7 @@ impl App {
             .and_then(|row| {
                 row.attach
                     .as_ref()
-                    .map(|attach| format!(" selected {}", attach.target))
+                    .map(|attach| format!(" selected {attach}"))
             })
             .unwrap_or_default();
         let footer = Paragraph::new(format!(
@@ -319,8 +421,15 @@ fn rows(
     snapshot: &Snapshot,
     vm_snapshot: Option<&vm::VmSnapshot>,
     vm_error: Option<&str>,
-    args: &TuiArgs,
+    args: &BrowseOptions,
 ) -> Vec<Row> {
+    let empty_vm_label = if vm_error.is_some() {
+        "    VM state unavailable"
+    } else if vm_snapshot.is_some() {
+        "    no vms"
+    } else {
+        "    loading vms"
+    };
     let mut vms_by_host: BTreeMap<String, Vec<&vm::VmRecord>> = BTreeMap::new();
     if let Some(vm_snapshot) = vm_snapshot {
         for record in &vm_snapshot.vms {
@@ -338,11 +447,12 @@ fn rows(
             host,
             vms_by_host.remove(&host.id).unwrap_or_default(),
             args,
+            empty_vm_label,
         ));
     }
     for (host, records) in vms_by_host {
         if rendered_hosts.insert(host.clone()) {
-            rows.extend(vm_only_host_rows(&host, records, args));
+            rows.extend(vm_only_host_rows(&host, records));
         }
     }
     if let Some(error) = vm_error {
@@ -355,7 +465,12 @@ fn rows(
     rows
 }
 
-fn host_rows(host: &Host, vms: Vec<&vm::VmRecord>, args: &TuiArgs) -> Vec<Row> {
+fn host_rows(
+    host: &Host,
+    vms: Vec<&vm::VmRecord>,
+    args: &BrowseOptions,
+    empty_vm_label: &str,
+) -> Vec<Row> {
     let mut rows = vec![Row {
         host: host.id.clone(),
         attach: None,
@@ -377,7 +492,12 @@ fn host_rows(host: &Host, vms: Vec<&vm::VmRecord>, args: &TuiArgs) -> Vec<Row> {
             rows.push(Row {
                 host: host.id.clone(),
                 attach: None,
-                label: "    no tmux sessions".into(),
+                label: if host.status == "loading" {
+                    "    loading sessions"
+                } else {
+                    "    no tmux sessions"
+                }
+                .into(),
             });
         } else {
             rows.extend(host.sessions.iter().map(|session| Row {
@@ -390,11 +510,11 @@ fn host_rows(host: &Host, vms: Vec<&vm::VmRecord>, args: &TuiArgs) -> Vec<Row> {
             }));
         }
     }
-    rows.extend(vm_section_rows(&host.id, vms, args));
+    rows.extend(vm_section_rows(&host.id, vms, empty_vm_label));
     rows
 }
 
-fn vm_only_host_rows(host: &str, vms: Vec<&vm::VmRecord>, args: &TuiArgs) -> Vec<Row> {
+fn vm_only_host_rows(host: &str, vms: Vec<&vm::VmRecord>) -> Vec<Row> {
     let mut rows = vec![Row {
         host: host.into(),
         attach: None,
@@ -410,11 +530,11 @@ fn vm_only_host_rows(host: &str, vms: Vec<&vm::VmRecord>, args: &TuiArgs) -> Vec
         attach: None,
         label: "    not discovered".into(),
     });
-    rows.extend(vm_section_rows(host, vms, args));
+    rows.extend(vm_section_rows(host, vms, "    no vms"));
     rows
 }
 
-fn vm_section_rows(host: &str, vms: Vec<&vm::VmRecord>, args: &TuiArgs) -> Vec<Row> {
+fn vm_section_rows(host: &str, vms: Vec<&vm::VmRecord>, empty_label: &str) -> Vec<Row> {
     let mut rows = vec![Row {
         host: host.into(),
         attach: None,
@@ -424,56 +544,45 @@ fn vm_section_rows(host: &str, vms: Vec<&vm::VmRecord>, args: &TuiArgs) -> Vec<R
         rows.push(Row {
             host: host.into(),
             attach: None,
-            label: "    no vms".into(),
+            label: empty_label.into(),
         });
     } else {
         rows.extend(vms.into_iter().map(|record| Row {
             host: host.into(),
-            attach: Some(vm_attach(&record.id, args)),
+            attach: Some(vm_attach(&record.id)),
             label: format!("    {} ({})  vm:{}", record.name, record.status, record.id),
         }));
     }
     rows
 }
 
-fn host_attach(host: &str, session_id: &str, args: &TuiArgs) -> PendingAttach {
-    if args.local || args.socket.is_some() {
-        PendingAttach {
-            target: session_id.into(),
-            socket: args.socket.clone(),
-            config_path: None,
-            host: None,
-            local: args.local,
-            state_dir: None,
-        }
-    } else {
-        PendingAttach {
-            target: format!("host:{host}:{session_id}"),
-            socket: None,
-            config_path: args.config.clone(),
-            host: None,
-            local: false,
-            state_dir: None,
-        }
+fn host_attach(host: &str, session_id: &str, args: &BrowseOptions) -> SessionTarget {
+    SessionTarget::HostTmux {
+        session: session_id.into(),
+        location: if args.local || args.socket.is_some() {
+            HostLocation::Local {
+                socket: args.socket.clone(),
+            }
+        } else {
+            HostLocation::Inventory {
+                machine: Some(host.into()),
+            }
+        },
     }
 }
 
-fn vm_attach(id: &str, args: &TuiArgs) -> PendingAttach {
-    PendingAttach {
-        target: format!("vm:{id}"),
-        socket: None,
-        config_path: args.config.clone(),
-        host: None,
-        local: false,
-        state_dir: None,
+fn vm_attach(id: &str) -> SessionTarget {
+    SessionTarget::Vm {
+        id: id.into(),
+        mode: GuestMode::Tmux,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{HostError, tmux};
-    use std::time::UNIX_EPOCH;
+    use crate::{discovery::HostError, tmux};
+    use std::{path::PathBuf, time::UNIX_EPOCH};
 
     fn snapshot() -> Snapshot {
         Snapshot {
@@ -540,12 +649,13 @@ mod tests {
         }
     }
 
-    fn args() -> TuiArgs {
-        TuiArgs {
+    fn args() -> BrowseOptions {
+        BrowseOptions {
             socket: None,
-            config: Some(PathBuf::from("config.local.toml")),
+            config_path: Some(PathBuf::from("config.local.toml")),
             host: None,
             local: false,
+            state_dir: None,
         }
     }
 
@@ -571,20 +681,33 @@ mod tests {
             .find_map(|row| {
                 row.attach
                     .as_ref()
-                    .filter(|attach| attach.target.starts_with("host:"))
+                    .filter(|attach| matches!(attach, SessionTarget::HostTmux { .. }))
             })
             .unwrap();
-        assert_eq!(host.target, "host:local:$1");
-        assert_eq!(host.config_path, Some(PathBuf::from("config.local.toml")));
+        assert_eq!(
+            host,
+            &SessionTarget::HostTmux {
+                session: "$1".into(),
+                location: HostLocation::Inventory {
+                    machine: Some("local".into())
+                }
+            }
+        );
         let vm = rows
             .iter()
             .find_map(|row| {
                 row.attach
                     .as_ref()
-                    .filter(|attach| attach.target == "vm:test")
+                    .filter(|attach| matches!(attach, SessionTarget::Vm { .. }))
             })
             .unwrap();
-        assert_eq!(vm.config_path, Some(PathBuf::from("config.local.toml")));
+        assert_eq!(
+            vm,
+            &SessionTarget::Vm {
+                id: "test".into(),
+                mode: GuestMode::Tmux
+            }
+        );
     }
 
     #[test]
@@ -592,8 +715,15 @@ mod tests {
         let mut args = args();
         args.socket = Some("/tmp/tmux.sock".into());
         let attach = host_attach("local", "$1", &args);
-        assert_eq!(attach.target, "$1");
-        assert_eq!(attach.socket.as_deref(), Some("/tmp/tmux.sock"));
+        assert_eq!(
+            attach,
+            SessionTarget::HostTmux {
+                session: "$1".into(),
+                location: HostLocation::Local {
+                    socket: Some("/tmp/tmux.sock".into())
+                }
+            }
+        );
     }
 
     #[test]

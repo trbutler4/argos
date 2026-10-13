@@ -52,17 +52,22 @@ Validation:
   were changed. Successful discovery on two physical machines remains an acceptance
   blocker, not a completed check. Hostnames and captured session data are not public.
 
-Discovery limits: no cached or live-streamed state. Discovery is a current snapshot, not a
-cache or live event stream. Remote login shells must support the fixed POSIX shell
-probe. A timed-out local SSH process is killed and reaped, but custom ProxyCommand
-subprocesses that outlive it are not guaranteed to be terminated in this slice.
-Reader threads never delay return past the deadline. Proxy cleanup needs a dedicated
-process-group follow-up before claiming arbitrary proxy-lifecycle coverage.
+The original discovery slice used detached readers and direct-child timeout
+cleanup. This has been superseded by the shared cancellable process-group runner
+and streaming picker refresh described in the connection review guide. CLI reads
+still return complete snapshots; the picker labels retained rows during refresh.
+Remote login shells must support the fixed POSIX probe. Arbitrary helpers that
+daemonize outside the owned process group remain outside the lifecycle guarantee.
 
 M0a has a working CLI path for discovery and a separate sessions layer for terminal entry. Host tmux remains unmanaged, while VM tmux belongs to managed environments. NixOS activation remains user-controlled.
 
 
 ### Slice 3: sessions attach layer
+
+The direct-attach and nested-switch behavior recorded in this historical slice
+has been replaced by mandatory origin-side ownership. See the
+[connection review guide](single-attachment-implementation.md) for the current
+host/VM entry contract and validation.
 
 Implemented interface: `argos sessions list` for explicit host-tmux discovery and
 `argos sessions attach TARGET` for terminal entry. Targets are typed at the edge:
@@ -209,9 +214,9 @@ Acceptance on the user's real machines:
 - **A02:** Enter a disposable session on each relevant host, including host tmux and VM-owned tmux. Record shell/process PID,
   run a counter, switch away and reconnect. Same remote process remains alive and
   the counter advanced. Removing only the SSH client must not kill the session.
-- **A03:** Run `sessions attach` inside and outside host tmux. Host targets connect
-  to unmanaged host tmux; VM targets connect to guest-owned tmux. Prefix forwarding, resize and terminal
-  cleanup work. Repeat through the TUI once TUI launch is added.
+- **A03:** Run `sessions attach` and `tui` from a plain origin terminal; host and
+  VM targets retain the same connection owner. Nested tmux/SSH entry is rejected
+  before creating another connection. Resize, picker return, and terminal cleanup work.
 - **A04:** Test an unreachable host, an authentication error, an untrusted host key,
   missing tmux and zero sessions. Each is distinct, and a bad host cannot freeze
   CLI completion or hide successful results from other hosts. JSON partial results
@@ -383,6 +388,11 @@ Not blockers for writing this scope:
   browser-origin requirements, and whether stacks should autostart after VM boot.
 
 ## Evidence discipline
+
+Implementation of PR #1's origin-side session switching is tracked in
+[Single-attachment implementation](single-attachment-implementation.md), including
+mandatory connection ownership across host/TUI/VM entry, guarded client
+identification, real PTY/SSH and microVM evidence, and remaining human acceptance checks.
 
 Unit tests may check parsers, quoting, operation transitions and port selection, but
 must not substitute for the real SSH/tmux/VM/browser checks above. Use disposable test

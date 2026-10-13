@@ -54,8 +54,8 @@ details, search/filter and a contextual action/help bar. M0b needs keyboard
 navigation, live reachability status, readable errors and a clear sessions-layer
 entry flow. Support terminal resizing
 and a usable compact layout. Specific widgets and keybindings remain design choices.
-A slow host probe must not block input or redraws. The TUI may run in a tmux window
-or be launched in a sufficiently large popup, but the popup is not the product itself.
+A slow host probe must not block input or redraws. The managed TUI runs in the
+original terminal outside tmux and SSH, and attachments return to that picker.
 
 ## 2. Machine inventory and remote discovery
 
@@ -91,18 +91,52 @@ from attachable entry points:
   `tmux new -A -s main`.
 - `argos sessions attach host:HOST:SESSION` enters unmanaged host tmux and must not
   imply Argos owns that session's lifecycle.
-- Host tmux may wrap the terminal, but it is not the project session owner for VM work.
+- Host tmux is independent of guest tmux, not a transport wrapper or project session owner for VM work.
 - The TUI shows host session rows and VM rows separately and dispatches Enter through
   the same sessions layer.
 - Keep an easy route back to the hub/picker and label VM sessions with their host/project.
 - Disconnecting or closing a tmux client must not kill sessions or restart shells.
 
 Preserve the user's existing tmux prefix, pane navigation and clipboard bindings.
-Remote tmux may be nested under local tmux, so prefix forwarding, returning to the
-hub, OSC 52 clipboard and resize need real tests rather than assumptions.
+Argos entry from inside tmux or SSH is rejected instead of nesting another client.
+Returning to the origin picker, OSC 52 clipboard and resize need real tests rather
+than assumptions.
 
 If two clients join the same session, accept tmux's native behavior and make
 it visible. Do not mistake multiple clients for duplicate environments.
+
+Every interactive entry retains the Linux origin-side owner: `sessions attach`,
+`tui`, `connect`, VM tmux/shell, and VM/task up attachment. A guarded destination
+binding exits only its managed tmux client with status 78; the owner reaps the
+transport before opening the shared host/VM picker. Cancel reconnects the last
+Argos-selected target. Local tmux, direct SSH host sessions, and local VM guest
+SSH are supported; proxy/jump transports remain excluded.
+See the [implementation review guide](single-attachment-implementation.md) for
+client identification, foreground process groups, lifecycle tests, and remaining
+human acceptance checks.
+
+The Rust connection path separates browser preferences (`BrowseOptions`) from
+typed attachment targets (`SessionTarget`). Preparation returns a command and
+canonical reconnect target as `PreparedAttachment`, without mutating inputs.
+`connect.rs` owns switching policy; `terminal.rs` owns Linux process/TTY mechanics
+and returns typed process outcomes. The TUI returns selections, and shared SSH
+policy lives in `ssh.rs`. This keeps CLI strings and picker protocol out of the
+low-level supervisor and avoids contradictory host/VM mode flags.
+
+`discovery.rs` supplies the same bounded probing core to CLI reads and the picker.
+The picker owns one refresh job, using scoped workers, an atomic cancellation
+flag, and a bounded channel. Completed hosts stream into the view while keyboard
+input remains on the UI thread. Refresh requests coalesce; selection is retained
+by typed target rather than row index. Job drop cancels and joins workers before
+handoff. The Linux captured-process runner holds the group leader until cleanup
+and uses nonblocking pipe reads, so inherited pipes cannot leave detached reader
+threads behind. Local VM scans check cancellation between records.
+
+VM persistence/schema handling lives in `vm/state.rs`, and guest SSH preparation
+and first-use trust live in `vm/guest.rs`. Lifecycle commands remain explicit in
+`vm.rs`. Process, SSH configuration, session preparation, and VM errors keep
+their useful categories until presentation; no generic backend or task framework
+is required for these boundaries.
 
 ## 4. A managed task environment
 
