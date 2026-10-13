@@ -180,6 +180,15 @@ clients receive guidance and stay attached.
 - **Shift-R:** retry the last target after failure; **r:** refresh discovery.
 - **q:** quit the picker. Normal tmux detach exits managed mode to the shell.
 
+The picker renders immediately and adds host/VM results as they arrive. Slow or
+failed hosts do not block navigation, resize, or quit. Local probes run first;
+remote probes use the configured concurrency and deadlines. During refresh,
+earlier rows are marked as potentially stale and selection follows the same
+target when rows move. Repeated `r` presses request at most one follow-up refresh.
+Selecting, retrying, or quitting cancels and joins active discovery before the
+next attachment starts. `READY` means the refresh finished, not that every host
+or VM is healthy; per-host errors remain visible.
+
 Selection disconnects first, so cancel requires reconnection and can fail.
 Failures remain visible with retry, selection, and quit controls. Sessions and
 pane processes remain alive while switching. Managed attachment uses tmux `-E`

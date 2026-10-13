@@ -21,6 +21,9 @@ while `sessions attach vm:<id>` enters guest-owned tmux. All interactive entry
 uses the Linux origin-side connection owner. Host and VM tmux share one picker;
 nested entry and SSH proxy/jump hosts are rejected. The guarded return binding
 is opt-in, but connection ownership is always on.
+Picker discovery streams results through one cancellable refresh job, keeps
+input responsive, and joins all probes before attachment. VM persisted state and
+guest SSH preparation are separated into `src/vm/state.rs` and `src/vm/guest.rs`.
 `examples/config.toml`
 is active inventory schema, while `examples/environment-proposal.toml` is a
 future proposal. Do not mark implementation milestones complete from

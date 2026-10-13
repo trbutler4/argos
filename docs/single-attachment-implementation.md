@@ -48,11 +48,15 @@ as a picker request.
 - `src/terminal.rs`: Linux process groups, signals, cleanup, reaping, and terminal
   restoration. It reports `ProcessOutcome` and knows nothing about picker status 78.
 - `src/ssh.rs`: shared interactive SSH policy and effective-config validation.
-- `src/process.rs`: bounded captured-process runner shared by discovery helpers.
+- `src/process.rs`: cancellable captured-process runner, owned Linux process
+  groups, output caps, and nonblocking pipe reads without detached readers.
+- `src/discovery.rs`: shared CLI probing and a single bounded refresh job for
+  the picker, including cancellable SSH preflight and local VM state reads.
 - `src/tui.rs`: host/VM rendering and typed selection/retry/quit outcomes. It
   receives the discovery request from the controller instead of doing SSH preflight.
-- `src/vm.rs`: guest SSH preparation, unmarked guest tmux bootstrap, and the
-  origin check before VM/task up mutation.
+- `src/vm.rs`: lifecycle commands and the origin check before VM/task up mutation.
+- `src/vm/state.rs`: persisted schema, validation, snapshot reads, and atomic publication.
+- `src/vm/guest.rs`: guest SSH preparation, unmarked tmux bootstrap, and first-use trust.
 - `examples/connect.tmux.conf`: optional guarded F12 binding, also installed at
   `$out/share/argos/connect.tmux.conf` by the Nix package.
 - `tests/connect.py`: default-TUI switching stress and PTY/SSH lifecycle checks.
@@ -90,10 +94,31 @@ reset sequences. Cleanup now retries the buffered flush with a deadline rather
 than re-emitting partially written commands, and interrupted wait calls resume
 the signal loop. PTY checks also assert restoration of descriptor flags.
 
-Remaining architecture work is incremental: move blocking discovery off the UI
-thread (joining/canceling probes before attachment), retain structured domain
-errors longer, and separate the large VM module's lifecycle/state/configuration
-responsibilities. These do not require a generic transport framework.
+### Responsive discovery
+
+The picker owns one refresh job. A small scoped worker pool publishes completed
+hosts through a 16-message channel, while local VM state is read concurrently.
+Local probes are scheduled before remote probes. Each remote host has one total
+preflight/discovery deadline. The UI drains a bounded batch per frame, preserving
+keyboard and resize handling. Unsupported SSH configurations appear as host
+errors instead of hiding healthy hosts.
+
+During refresh, retained rows are visibly stale until replaced. Selection follows
+the same typed target when rows shift. Multiple refresh keystrokes coalesce into
+one pending follow-up, not overlapping jobs. Selection, retry, quit, signals, and
+UI errors drop the refresh job: cancel processes, close the channel to unblock
+producers, then join workers. Only after that can attachment preparation proceed.
+
+Captured commands have nonblocking output pipes and bounded reads in one loop.
+On Linux, their group leader stays unreaped until group cleanup, including when
+a child exits but descendants retain its pipes. Timeout, cancellation, output
+limit, and I/O failures all run the same cleanup guard. Cooperative cancellation
+is checked between local VM records as well.
+
+Process, SSH-config, target-selection, discovery, and VM errors now remain
+structured through preparation. Formatting happens at the CLI/UI boundary.
+The implementation uses ordinary threads, channels, enums, and ownership guards;
+there is no general task scheduler or transport framework.
 
 ## Client identification
 
@@ -143,7 +168,7 @@ daemonizing custom SSH helpers are outside the tested ownership contract.
 
 Pinned Linux development shell: tmux 3.7c, OpenSSH 10.5p1.
 
-All checks below passed, including 33 Rust tests, the Nix package build, the
+All checks below passed, including 35 Rust tests, the Nix package build, the
 packaged binary/binding running the full 100-switch TUI test, and real VM acceptance.
 
 - Rust formatting, tests, Clippy, locked build, and contributor Python scripts.
@@ -155,11 +180,18 @@ packaged binary/binding running the full 100-switch TUI test, and real VM accept
 - Cancel/retry/quit, failed targets, host-key/authentication failures, proxy
   rejection, transport loss, resize, bracketed paste, Ctrl-C, signals, and
   real Bash suspend/resume job control.
+- Slow preflight/probe fixtures enforce responsive initial rendering, healthy
+  local results, and cancellation in under two seconds. They verify quit,
+  Ctrl-C, SIGTERM, inherited-pipe descendant cleanup, coalesced refreshes, stable
+  selection after row insertion, and no discovery/attachment overlap.
 - A disposable QEMU/KVM VM: guest bootstrap marker isolation, VM tmux/shell and
   sessions entry, host/VM switching through TUI, reconnect, pane persistence,
   explicit VM state roots without inventory, pinned guest trust, and cleanup.
   Generated credentials and isolated
   HOME/state/tmux servers prevent using personal credentials or sessions.
+- Accepted VM IDs with trailing punctuation and maximum length produce bounded,
+  valid guest hostnames while retaining their original state IDs. The real VM
+  fixture now deliberately boots an ID ending in an underscore.
 
 Commands live in README. `tests/vm_connect.py` boots a VM and must only be run
 with permission; it stops and removes its own fixture. Physical-host latency,

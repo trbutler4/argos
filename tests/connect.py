@@ -79,7 +79,34 @@ def main():
         wrapper_dir = root / "bin"
         wrapper_dir.mkdir()
         wrapper = wrapper_dir / "ssh"
-        wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(actual_ssh)} -F {shlex.quote(str(ssh_config))} "$@"\n')
+        probe_log = root / "probe-pids"
+        overlap = root / "probe-overlap"
+        guard = root / "probe-guard"
+        # Delay actual preflight/discovery invocations, never fabricate SSH
+        # results. Children inherit pipes to exercise complete group cleanup.
+        wrapper.write_text(f'''#!/bin/sh
+root={shlex.quote(str(root))}
+mode=
+case " $* " in
+  *" -G "*) mode=config ;;
+  *list-sessions*) mode=probe ;;
+esac
+if [ -n "$mode" ] && [ -f "$root/slow-$mode" ]; then
+  sleep 30 & helper=$!
+  printf '%s %s\\n' "$$" "$helper" >> "$root/probe-pids"
+  if [ -f "$root/exit-probe-parent" ]; then exit 0; fi
+  wait "$helper"
+fi
+case " $* " in
+  *attach-session*)
+    if [ -f "$root/probe-guard" ]; then
+      for pid in $(cat "$root/probe-guard"); do
+        if kill -0 "$pid" 2>/dev/null; then printf '%s\\n' "$pid" >> "$root/probe-overlap"; fi
+      done
+    fi ;;
+esac
+exec {shlex.quote(actual_ssh)} -F {shlex.quote(str(ssh_config))} "$@"
+''')
         wrapper.chmod(0o755)
         env["PATH"] = str(wrapper_dir) + os.pathsep + env["PATH"]
 
@@ -131,7 +158,7 @@ def main():
         sshd_config.write_text(
             f"HostKey {keys[0]}\nAuthorizedKeysFile {authorized}\nUsePAM no\nStrictModes no\n"
             f"PasswordAuthentication no\nAuthenticationMethods publickey\nListenAddress 127.0.0.1\nPort {port}\n"
-            "LogLevel ERROR\nPidFile none\nPermitTTY yes\n"
+            "LogLevel ERROR\nPidFile none\nPermitTTY yes\nPerSourcePenalties no\n"
         )
         sshd = subprocess.Popen([shutil.which("sshd"), "-D", "-e", "-f", str(sshd_config)],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -145,12 +172,17 @@ def main():
             return dict(line.split("|", 1) for line in text.splitlines())
 
         def children(term):
-            path = Path(f"/proc/{term.process.pid}/task/{term.process.pid}/children")
-            return path.read_text().split() if path.exists() else []
+            owned = set()
+            for path in Path(f"/proc/{term.process.pid}/task").glob("*/children"):
+                try:
+                    owned.update(path.read_text().split())
+                except FileNotFoundError:
+                    pass
+            return sorted(owned)
 
         def picker(term, error=False):
             needle = b"failed:" if error else b"Origin-side"
-            wait(lambda: needle in term.output, "picker did not render")
+            wait(lambda: needle in term.output and b"READY" in term.output, "picker did not finish discovery")
             assert children(term) == [], "picker opened before owned child was reaped"
             assert os.tcgetpgrp(term.master) == term.process.pid, "foreground group not restored"
 
@@ -385,9 +417,81 @@ def main():
             proxy_marker = root / "proxy-ran"
             ssh_config.write_text(saved_config + f" ProxyCommand touch {proxy_marker}\n")
             proxy = terminal(*connect, f"host:b:{ids['b']}")
-            exited(proxy, 1)
+            picker(proxy, error=True)
             assert b"ProxyCommand" in proxy.output and not proxy_marker.exists()
+            proxy.send(b"q")
+            exited(proxy)
             ssh_config.write_text(saved_config)
+
+            # The initial screen, healthy local data, and quit remain responsive
+            # during slow SSH config inspection and slow tmux probes. The last
+            # case leaves an exited wrapper with a live child holding its pipes.
+            for mode, orphan_pipe, exit_code in (("config", False, 0), ("probe", False, 130), ("probe", True, 143)):
+                probe_log.write_text("")
+                slow = root / f"slow-{mode}"
+                slow.touch()
+                parent_exit = root / "exit-probe-parent"
+                if orphan_pipe:
+                    parent_exit.touch()
+                started = time.monotonic()
+                responsive = terminal(str(BINARY), "tui", "--config", str(config))
+                wait(lambda: b"Origin-side" in responsive.output and b"windows" in responsive.output,
+                     "slow discovery blocked first render or healthy local sessions", timeout=2)
+                assert time.monotonic() - started < 2
+                wait(lambda: len(probe_log.read_text().splitlines()) == 2, "slow probes did not start")
+                if mode == "config":
+                    responsive.output = b""
+                    fcntl.ioctl(responsive.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 34, 140, 0, 0))
+                    os.kill(responsive.process.pid, signal.SIGWINCH)
+                    wait(lambda: b"\x1b[34;1H" in responsive.output, "resize blocked by discovery", timeout=2)
+                pids = probe_log.read_text().split()
+                started = time.monotonic()
+                if exit_code == 143:
+                    os.kill(responsive.process.pid, signal.SIGTERM)
+                else:
+                    responsive.send(b"q" if exit_code == 0 else b"\x03")
+                exited(responsive, exit_code)
+                assert time.monotonic() - started < 2, "quit waited for discovery deadline"
+                wait(lambda: all(not Path(f"/proc/{pid}").exists() for pid in pids), "cancel left probe descendants")
+                slow.unlink()
+                if orphan_pipe:
+                    parent_exit.unlink()
+
+            # Refresh keeps old rows visible but marked stale, coalesces repeated
+            # requests, preserves target identity when rows shift, and joins all
+            # probes before starting an interactive transport.
+            refreshed = terminal(str(BINARY), "tui", "--config", str(config))
+            picker(refreshed)
+            idle_threads = len(list(Path(f"/proc/{refreshed.process.pid}/task").iterdir()))
+            refreshed.send(b"jjjjj")  # select b
+            vms = root / "empty-state" / "vms"
+            vms.mkdir(parents=True)
+            for number in (0, 1):
+                (vms / f"refresh-{number}.json").write_text(json.dumps({
+                    "schema_version": 1, "id": f"refresh-{number}", "name": f"Refresh VM {number}",
+                    "host": "a", "status": "stopped",
+                }))
+            probe_log.write_text("")
+            slow = root / "slow-probe"
+            slow.touch()
+            refreshed.send(b"r")
+            wait(lambda: len(probe_log.read_text().splitlines()) == 2 and b"stale" in refreshed.output,
+                 "refresh did not stream stale/loading state")
+            wait(lambda: b"Refresh" in refreshed.output, "VM results did not arrive during slow host probes")
+            refreshed.send(b"r" * 40)
+            time.sleep(0.1)
+            assert len(probe_log.read_text().splitlines()) == 2, "refresh started overlapping jobs"
+            assert len(list(Path(f"/proc/{refreshed.process.pid}/task").iterdir())) <= idle_threads + 4
+            old_pids = probe_log.read_text().split()
+            guard.write_text(" ".join(line.split()[0] for line in probe_log.read_text().splitlines()))
+            slow.unlink()  # already-running probes still sleep until cancelled
+            refreshed.send(b"\r")
+            wait(lambda: len(managed("b")) == 1, "refresh changed selected target or blocked attachment")
+            assert not overlap.exists(), "new transport overlapped old discovery children"
+            wait(lambda: all(not Path(f"/proc/{pid}").exists() for pid in old_pids), "handoff left probe descendants")
+            refreshed.send(b"\x02d")
+            exited(refreshed)
+            guard.unlink()
 
             for host in sockets:
                 assert before[host] == tmux(host, "list-panes", "-a", "-F", "#{pane_id}|#{pane_pid}")
@@ -407,6 +511,7 @@ def main():
                 sshd.wait()
     print("PASS: managed local/SSH picker, guarded per-client handoff, cancel/retry/quit,")
     print("      repeated cross-host switching, master isolation, owned-child cleanup, resize and persistence.")
+    print("      Slow-probe rendering/resize/quit, cancellation, coalesced refresh, and joined handoff.")
 
 
 if __name__ == "__main__":

@@ -11,15 +11,18 @@ struct AttachTarget {
     ssh_alias: Option<String>,
 }
 
-fn select<'a>(sessions: &'a [tmux::Session], query: &str) -> Result<&'a tmux::Session, String> {
+fn select<'a>(
+    sessions: &'a [tmux::Session],
+    query: &str,
+) -> Result<&'a tmux::Session, PrepareError> {
     let matches: Vec<_> = sessions
         .iter()
         .filter(|s| s.id == query || s.name == query)
         .collect();
     match matches.as_slice() {
         [session] => Ok(session),
-        [] => Err(format!("tmux session not found: {query:?}")),
-        _ => Err(format!("tmux session is ambiguous: {query:?}")),
+        [] => Err(PrepareError::NotFound(query.into())),
+        _ => Err(PrepareError::Ambiguous(query.into())),
     }
 }
 
@@ -164,18 +167,53 @@ pub(crate) struct PreparedAttachment {
     pub(crate) reconnect_target: SessionTarget,
 }
 
+#[derive(Debug)]
+pub(crate) enum PrepareError {
+    Configuration(String),
+    NotFound(String),
+    Ambiguous(String),
+    Discovery(tmux::TmuxError),
+    Ssh(ssh::ConfigError),
+    Vm(vm::VmError),
+}
+
+impl fmt::Display for PrepareError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Configuration(message) => f.write_str(message),
+            Self::NotFound(query) => write!(f, "tmux session not found: {query:?}"),
+            Self::Ambiguous(query) => write!(f, "tmux session is ambiguous: {query:?}"),
+            Self::Discovery(error) => error.fmt(f),
+            Self::Ssh(error) => error.fmt(f),
+            Self::Vm(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for PrepareError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Discovery(e) => Some(e),
+            Self::Ssh(e) => Some(e),
+            Self::Vm(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 /// Resolve targets and build commands. Only the connection owner executes them.
 pub(crate) fn prepare(
     target: &SessionTarget,
     options: &BrowseOptions,
-) -> Result<PreparedAttachment, String> {
+) -> Result<PreparedAttachment, PrepareError> {
     let (session, location) = match target {
         SessionTarget::Vm { id, mode } => {
             let command = vm::prepare_guest_command(vm::GuestCommandOptions {
                 id: id.clone(),
                 state_dir: options.state_dir.clone(),
                 mode: *mode,
-            })?;
+            })
+            .map_err(PrepareError::Vm)?;
             return Ok(PreparedAttachment {
                 command,
                 reconnect_target: target.clone(),
@@ -185,14 +223,14 @@ pub(crate) fn prepare(
     };
     let target = resolve_target(location, options.config_path.as_deref())?;
     if let Some(alias) = &target.ssh_alias {
-        ssh::validate_destination(alias)?;
+        ssh::validate_destination(alias).map_err(PrepareError::Ssh)?;
     }
     let sessions = tmux::discover(
         target.socket.as_deref(),
         target.ssh_alias.as_deref(),
         Duration::from_secs(3),
     )
-    .map_err(|error| format!("{}: {}", error.code, error.message))?;
+    .map_err(PrepareError::Discovery)?;
     let selected = select(&sessions, session)?;
     let command = if let Some(alias) = &target.ssh_alias {
         let mut command = ssh::interactive_command();
@@ -218,7 +256,7 @@ pub(crate) fn prepare(
 fn resolve_target(
     location: &HostLocation,
     config_path: Option<&std::path::Path>,
-) -> Result<AttachTarget, String> {
+) -> Result<AttachTarget, PrepareError> {
     let host = match location {
         HostLocation::Local { socket } => {
             return Ok(AttachTarget {
@@ -232,12 +270,15 @@ fn resolve_target(
     let loaded = match config_path {
         Some(p) => config::load(p).map(Some),
         None => config::default_path().map_or(Ok(None), |p| config::load_implicit(&p)),
-    }?;
+    }
+    .map_err(PrepareError::Configuration)?;
     let cfg = match loaded {
         Some(c) => c,
         None => {
             if host.is_some() {
-                return Err("--host requires a configured inventory".into());
+                return Err(PrepareError::Configuration(
+                    "--host requires a configured inventory".into(),
+                ));
             }
             return Ok(AttachTarget {
                 location: HostLocation::Local { socket: None },
@@ -250,7 +291,7 @@ fn resolve_target(
     let machine = cfg
         .machines
         .get(id)
-        .ok_or_else(|| format!("unknown host id: {id}"))?;
+        .ok_or_else(|| PrepareError::Configuration(format!("unknown host id: {id}")))?;
     Ok(AttachTarget {
         location: HostLocation::Inventory {
             machine: Some(id.into()),
@@ -350,8 +391,14 @@ mod tests {
                 attached_clients: 0,
             },
         ];
-        assert!(select(&sessions, "$1").is_err());
-        assert!(select(&sessions, "wo").is_err());
+        assert!(matches!(
+            select(&sessions, "$1"),
+            Err(PrepareError::Ambiguous(_))
+        ));
+        assert!(matches!(
+            select(&sessions, "wo"),
+            Err(PrepareError::NotFound(_))
+        ));
         assert_eq!(select(&sessions, "work").unwrap().id, "$1");
     }
     #[test]

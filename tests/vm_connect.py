@@ -50,8 +50,8 @@ def main():
     wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(shutil.which("ssh"))} -F {shlex.quote(str(ssh_config))} "$@"\n')
     wrapper.chmod(0o755)
     env["PATH"] = str(wrapper_dir) + os.pathsep + env["PATH"]
-    # tempfile suffixes may end in '_', which is not a valid NixOS hostname end.
-    identifier = "connect-check-" + root.name.rsplit("-", 1)[1].replace("_", "x")
+    # A valid state ID can end in '_'; the derived guest hostname must still boot.
+    identifier = "connect-check-" + root.name.rsplit("-", 1)[1] + "_"
     terminals = []
     created = False
 
@@ -137,16 +137,16 @@ def main():
         run("tmux", "-S", str(host_socket), "-f", "/dev/null", "new-session", "-d", "-s", "host-fixture", "/bin/sh")
         run("tmux", "-S", str(host_socket), "source-file", str(BINDING))
         browser = terminal(str(BINARY), "tui", "--config", str(config), "--state-dir", str(state))
-        wait(lambda: b"Origin-side" in browser.output and b"Connection" in browser.output, "VM row missing")
+        wait(lambda: b"Origin-side" in browser.output and b"Connection" in browser.output and b"READY" in browser.output, "VM row missing")
         # Last row is the isolated VM; host inventory has one other session.
         browser.send(b"j" * 100 + b"\r")
         wait(lambda: client_count() == 1, "TUI did not enter VM")
         browser.send(b"\x1b[24~")
-        wait(lambda: b"Origin-side" in browser.output, "VM picker handoff failed")
+        wait(lambda: b"Origin-side" in browser.output and b"READY" in browser.output, "VM picker handoff failed")
         browser.send(b"\r")
         wait(lambda: bool(run("tmux", "-S", str(host_socket), "list-clients", "-F", "#{client_pid}").stdout.strip()), "VM-to-host switch failed")
         browser.send(b"\x1b[24~")
-        wait(lambda: b"Origin-side" in browser.output, "host picker handoff failed")
+        wait(lambda: b"Origin-side" in browser.output and b"READY" in browser.output, "host picker handoff failed")
         browser.send(b"j" * 100 + b"\r")
         wait(lambda: client_count() == 1, "host-to-VM switch failed")
         browser.send(b"\x02d")

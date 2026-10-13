@@ -103,12 +103,6 @@ fn run_inner(mut next: Option<SessionTarget>, options: &BrowseOptions) -> Result
                     options.local,
                 )
                 .map_err(|(message, _)| message)?;
-                // Transport policy stays here, never in terminal rendering.
-                for (_, alias, _) in &request.machines {
-                    if let Some(alias) = alias {
-                        crate::ssh::validate_destination(alias)?;
-                    }
-                }
                 match tui::pick_session(
                     request,
                     options,
@@ -129,9 +123,9 @@ fn run_inner(mut next: Option<SessionTarget>, options: &BrowseOptions) -> Result
         };
         let prepared = match sessions::prepare(&selected, options) {
             Ok(prepared) => prepared,
-            Err(message) => {
+            Err(prepare_error) => {
                 previous = Some(selected);
-                error = Some(message);
+                error = Some(prepare_error.to_string());
                 continue;
             }
         };

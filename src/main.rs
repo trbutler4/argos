@@ -1,17 +1,14 @@
 use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use clap_complete::CompleteEnv;
 use clap_complete::engine::ArgValueCandidates;
-use serde::Serialize;
-use std::{
-    process::ExitCode,
-    sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+pub(crate) use discovery::{Host, Snapshot, SnapshotRequest, discover_snapshot, snapshot_request};
+use std::process::ExitCode;
 
 mod completions;
 mod config;
 #[cfg(target_os = "linux")]
 mod connect;
+mod discovery;
 #[cfg(target_os = "linux")]
 mod terminal;
 #[cfg(not(target_os = "linux"))]
@@ -388,31 +385,6 @@ enum TaskCommand {
         json: bool,
     },
 }
-#[derive(Clone, Serialize)]
-pub(crate) struct Snapshot {
-    pub(crate) schema_version: u32,
-    pub(crate) observed_at_unix_ms: u64,
-    pub(crate) hosts: Vec<Host>,
-}
-#[derive(Clone, Serialize)]
-pub(crate) struct Host {
-    pub(crate) id: String,
-    pub(crate) status: &'static str,
-    pub(crate) sessions: Vec<tmux::Session>,
-    pub(crate) error: Option<HostError>,
-}
-#[derive(Clone, Serialize)]
-pub(crate) struct HostError {
-    pub(crate) code: String,
-    pub(crate) message: String,
-}
-
-pub(crate) struct SnapshotRequest {
-    pub(crate) machines: Vec<(String, Option<String>, Option<String>)>,
-    pub(crate) timeout_secs: u64,
-    pub(crate) parallel: usize,
-}
-
 fn main() -> ExitCode {
     // Must run before parsing: when the shell invokes the completer this exits
     // early and never reaches normal command dispatch.
@@ -722,144 +694,6 @@ fn run_list(
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
-    }
-}
-
-pub(crate) fn snapshot_request(
-    socket: Option<String>,
-    config_path: Option<std::path::PathBuf>,
-    host_filter: Option<String>,
-    force_local: bool,
-) -> Result<SnapshotRequest, (String, u8)> {
-    if force_local || socket.is_some() {
-        return local_request(socket)
-            .map_err(|error| (format!("cannot read local hostname: {error}"), 1));
-    }
-    let loaded = match config_path {
-        Some(path) => config::load(&path).map(Some),
-        None => match config::default_path() {
-            Some(path) => config::load_implicit(&path),
-            None => Ok(None),
-        },
-    };
-    let config = match loaded {
-        Ok(Some(config)) => config,
-        Ok(None) if host_filter.is_none() => {
-            return local_request(None)
-                .map_err(|error| (format!("cannot read local hostname: {error}"), 1));
-        }
-        Ok(None) => {
-            return Err(("--host requires a configured inventory".into(), 2));
-        }
-        Err(error) => {
-            return Err((error, 2));
-        }
-    };
-    if let Some(id) = &host_filter
-        && !config.machines.contains_key(id)
-    {
-        return Err((format!("unknown host id: {id}"), 2));
-    }
-    let machines = config
-        .machines
-        .iter()
-        .filter(|(id, _)| host_filter.as_ref().is_none_or(|filter| filter == *id))
-        .map(|(id, machine)| {
-            (
-                id.clone(),
-                machine.ssh_alias.clone(),
-                machine.socket.clone(),
-            )
-        })
-        .collect();
-    Ok(SnapshotRequest {
-        machines,
-        timeout_secs: config.client.connect_timeout_seconds,
-        parallel: config.client.max_parallel_probes,
-    })
-}
-
-fn local_request(socket: Option<String>) -> Result<SnapshotRequest, std::io::Error> {
-    Ok(SnapshotRequest {
-        machines: vec![(local_hostname()?, None, socket)],
-        timeout_secs: 3,
-        parallel: 1,
-    })
-}
-
-fn local_hostname() -> Result<String, std::io::Error> {
-    Ok(std::fs::read_to_string("/proc/sys/kernel/hostname")?
-        .trim_end_matches(['\r', '\n'])
-        .to_owned())
-}
-pub(crate) fn discover_snapshot(request: &SnapshotRequest) -> Snapshot {
-    let results = Arc::new(Mutex::new(
-        (0..request.machines.len())
-            .map(|_| None)
-            .collect::<Vec<Option<Host>>>(),
-    ));
-    let next = Arc::new(Mutex::new(0usize));
-    std::thread::scope(|scope| {
-        for _ in 0..request.parallel.min(request.machines.len().max(1)) {
-            let results = Arc::clone(&results);
-            let next = Arc::clone(&next);
-            let machines = &request.machines;
-            let timeout_secs = request.timeout_secs;
-            scope.spawn(move || {
-                loop {
-                    let i = {
-                        let mut n = next.lock().unwrap();
-                        if *n >= machines.len() {
-                            break;
-                        }
-                        let i = *n;
-                        *n += 1;
-                        i
-                    };
-                    let (id, alias, socket) = &machines[i];
-                    let r = tmux::discover(
-                        socket.as_deref(),
-                        alias.as_deref(),
-                        Duration::from_secs(timeout_secs),
-                    );
-                    let h = match r {
-                        Ok(s) => Host {
-                            id: id.clone(),
-                            status: "ok",
-                            sessions: s,
-                            error: None,
-                        },
-                        Err(e) => {
-                            eprintln!("error: {id}: {}: {:?}", e.code, e.message);
-                            Host {
-                                id: id.clone(),
-                                status: "error",
-                                sessions: vec![],
-                                error: Some(HostError {
-                                    code: e.code,
-                                    message: e.message,
-                                }),
-                            }
-                        }
-                    };
-                    results.lock().unwrap()[i] = Some(h);
-                }
-            });
-        }
-    });
-    let hosts = results
-        .lock()
-        .unwrap()
-        .iter_mut()
-        .map(|h| h.take().unwrap())
-        .collect::<Vec<_>>();
-    Snapshot {
-        schema_version: 1,
-        observed_at_unix_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
-        hosts,
     }
 }
 

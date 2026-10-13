@@ -52,12 +52,12 @@ Validation:
   were changed. Successful discovery on two physical machines remains an acceptance
   blocker, not a completed check. Hostnames and captured session data are not public.
 
-Discovery limits: no cached or live-streamed state. Discovery is a current snapshot, not a
-cache or live event stream. Remote login shells must support the fixed POSIX shell
-probe. A timed-out local SSH process is killed and reaped, but custom ProxyCommand
-subprocesses that outlive it are not guaranteed to be terminated in this slice.
-Reader threads never delay return past the deadline. Proxy cleanup needs a dedicated
-process-group follow-up before claiming arbitrary proxy-lifecycle coverage.
+The original discovery slice used detached readers and direct-child timeout
+cleanup. This has been superseded by the shared cancellable process-group runner
+and streaming picker refresh described in the connection review guide. CLI reads
+still return complete snapshots; the picker labels retained rows during refresh.
+Remote login shells must support the fixed POSIX probe. Arbitrary helpers that
+daemonize outside the owned process group remain outside the lifecycle guarantee.
 
 M0a has a working CLI path for discovery and a separate sessions layer for terminal entry. Host tmux remains unmanaged, while VM tmux belongs to managed environments. NixOS activation remains user-controlled.
 

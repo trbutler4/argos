@@ -271,6 +271,10 @@ fn run_error(error: process::RunError) -> HostStatusError {
             code: "timeout".into(),
             message: "host status check timed out".into(),
         },
+        process::RunError::Cancelled => HostStatusError {
+            code: "cancelled".into(),
+            message: "host status cancelled".into(),
+        },
         process::RunError::OutputLimit => HostStatusError {
             code: "output_limit".into(),
             message: "host status output exceeded limit".into(),

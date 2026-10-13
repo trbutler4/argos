@@ -78,7 +78,7 @@ def main():
             while time.monotonic() < deadline:
                 drain(master, output)
                 text = output.decode(errors="ignore")
-                if all(token in text for token in ("Argos", "sessions", "vms", "Test", "VM", "Enter", "attach", "refresh", "quit")):
+                if all(token in text for token in ("Argos", "sessions", "vms", "Test", "VM", "Enter", "attach", "refresh", "quit", "READY")):
                     return
                 time.sleep(0.05)
             raise AssertionError(output.decode(errors="ignore"))

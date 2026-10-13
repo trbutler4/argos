@@ -1,5 +1,6 @@
+use crate::discovery::{RefreshJob, Update, observed_now};
 use crate::sessions::{BrowseOptions, GuestMode, HostLocation, SessionTarget};
-use crate::{Host, Snapshot, SnapshotRequest, discover_snapshot, vm};
+use crate::{Host, Snapshot, SnapshotRequest, vm};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
@@ -16,6 +17,7 @@ use ratatui::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, Stdout},
+    sync::mpsc::TryRecvError,
     time::Duration,
 };
 
@@ -48,11 +50,43 @@ pub(crate) fn pick_session(
         ));
     }
     app.notice = Some(notice);
+    app.rebuild_rows();
     let mut terminal = TerminalGuard::enter()?;
-    app.refresh();
+    let mut job = Some(RefreshJob::start(
+        app.request.clone(),
+        app.args.state_dir.clone(),
+    )?);
+    let mut refresh_pending = false;
     loop {
         if let Some(code) = owner.poll_idle()? {
             return Ok(PickResult::Quit(code));
+        }
+        // Bounded updates per frame keep input responsive with many fast hosts.
+        for _ in 0..16 {
+            let Some(active) = &job else { break };
+            match active.try_recv() {
+                Ok(Update::Finished) => {
+                    job.take().expect("active refresh").stop()?;
+                    app.finish_refresh();
+                    if refresh_pending {
+                        refresh_pending = false;
+                        app.begin_refresh();
+                        job = Some(RefreshJob::start(
+                            app.request.clone(),
+                            app.args.state_dir.clone(),
+                        )?);
+                    }
+                    break;
+                }
+                Ok(update) => app.apply(update),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    job.take().expect("active refresh").stop()?;
+                    return Err(io::Error::other(
+                        "discovery worker stopped without completing",
+                    ));
+                }
+            }
         }
         terminal.terminal.draw(|frame| app.render(frame))?;
         if event::poll(Duration::from_millis(100))?
@@ -70,11 +104,21 @@ pub(crate) fn pick_session(
                         PickResult::Quit(0)
                     });
                 }
-                _ => {
-                    if let Some(Action::Attach(attach)) = app.handle_key(key) {
-                        return Ok(PickResult::Select(attach));
+                _ => match app.handle_key(key) {
+                    Some(Action::Attach(attach)) => return Ok(PickResult::Select(attach)),
+                    Some(Action::Refresh) => {
+                        if job.is_some() {
+                            refresh_pending = true;
+                        } else {
+                            app.begin_refresh();
+                            job = Some(RefreshJob::start(
+                                app.request.clone(),
+                                app.args.state_dir.clone(),
+                            )?);
+                        }
                     }
-                }
+                    _ => {}
+                },
             }
         }
     }
@@ -120,6 +164,7 @@ impl Drop for ScreenGuard {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
     Quit,
+    Refresh,
     Attach(SessionTarget),
 }
 
@@ -140,17 +185,29 @@ struct App {
     selected: usize,
     last_status: String,
     notice: Option<String>,
+    loading: bool,
+    preserve_selection: bool,
 }
 
 impl App {
     fn new(request: SnapshotRequest, args: BrowseOptions) -> Self {
+        let hosts = request
+            .machines
+            .iter()
+            .map(|target| Host {
+                id: target.id.clone(),
+                status: "loading",
+                sessions: Vec::new(),
+                error: None,
+            })
+            .collect();
         Self {
             request,
             args,
             snapshot: Snapshot {
                 schema_version: 1,
                 observed_at_unix_ms: 0,
-                hosts: Vec::new(),
+                hosts,
             },
             vm_snapshot: None,
             vm_error: None,
@@ -158,21 +215,51 @@ impl App {
             selected: 0,
             last_status: "loading".into(),
             notice: None,
+            loading: true,
+            preserve_selection: false,
         }
     }
 
-    fn refresh(&mut self) {
-        self.snapshot = discover_snapshot(&self.request);
-        match vm::snapshot(self.args.state_dir.clone()) {
-            Ok(snapshot) => {
+    fn begin_refresh(&mut self) {
+        self.loading = true;
+        for host in &mut self.snapshot.hosts {
+            host.status = "refreshing";
+        }
+        self.rebuild_rows();
+    }
+
+    fn finish_refresh(&mut self) {
+        self.loading = false;
+        self.snapshot.observed_at_unix_ms = observed_now();
+        self.rebuild_rows();
+    }
+
+    fn apply(&mut self, update: Update) {
+        match update {
+            Update::Host(host) => {
+                if let Some(slot) = self.snapshot.hosts.iter_mut().find(|old| old.id == host.id) {
+                    *slot = host;
+                }
+            }
+            Update::Vms(Ok(snapshot)) => {
                 self.vm_snapshot = Some(snapshot);
                 self.vm_error = None;
             }
-            Err(error) => {
+            Update::Vms(Err(error)) => {
+                self.vm_error = Some(error.to_string());
                 self.vm_snapshot = None;
-                self.vm_error = Some(error);
             }
+            Update::Finished => unreachable!("job completion is handled by the picker"),
         }
+        self.rebuild_rows();
+    }
+
+    fn rebuild_rows(&mut self) {
+        let selected_target = self
+            .rows
+            .get(self.selected)
+            .and_then(|row| row.attach.as_ref())
+            .cloned();
         self.rows = rows(
             &self.snapshot,
             self.vm_snapshot.as_ref(),
@@ -180,10 +267,19 @@ impl App {
             &self.args,
         );
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
-        if self
-            .rows
-            .get(self.selected)
-            .is_none_or(|row| row.attach.is_none())
+        if self.preserve_selection
+            && let Some(index) = selected_target.and_then(|target| {
+                self.rows
+                    .iter()
+                    .position(|row| row.attach.as_ref() == Some(&target))
+            })
+        {
+            self.selected = index;
+        } else if (!self.preserve_selection
+            || self
+                .rows
+                .get(self.selected)
+                .is_none_or(|row| row.attach.is_none()))
             && let Some(index) = self.rows.iter().position(|row| row.attach.is_some())
         {
             self.selected = index;
@@ -206,7 +302,12 @@ impl App {
             .count()
             + usize::from(self.vm_error.is_some());
         self.last_status = format!(
-            "{} hosts, {total_sessions} sessions, {total_vms} vms, {failed} errors",
+            "{} | {} hosts, {total_sessions} sessions, {total_vms} vms, {failed} errors",
+            if self.loading {
+                "refreshing (earlier rows may be stale)"
+            } else {
+                "READY"
+            },
             self.snapshot.hosts.len()
         );
     }
@@ -223,16 +324,21 @@ impl App {
                 .and_then(|row| row.attach.clone())
                 .map(Action::Attach),
             KeyCode::Down | KeyCode::Char('j') => {
+                self.preserve_selection = true;
                 self.move_down();
                 None
             }
             KeyCode::Up | KeyCode::Char('k') => {
+                self.preserve_selection = true;
                 self.move_up();
                 None
             }
             KeyCode::Char('r') => {
-                self.refresh();
-                None
+                self.preserve_selection = self
+                    .rows
+                    .get(self.selected)
+                    .is_some_and(|row| row.attach.is_some());
+                Some(Action::Refresh)
             }
             _ => None,
         }
@@ -317,6 +423,13 @@ fn rows(
     vm_error: Option<&str>,
     args: &BrowseOptions,
 ) -> Vec<Row> {
+    let empty_vm_label = if vm_error.is_some() {
+        "    VM state unavailable"
+    } else if vm_snapshot.is_some() {
+        "    no vms"
+    } else {
+        "    loading vms"
+    };
     let mut vms_by_host: BTreeMap<String, Vec<&vm::VmRecord>> = BTreeMap::new();
     if let Some(vm_snapshot) = vm_snapshot {
         for record in &vm_snapshot.vms {
@@ -334,6 +447,7 @@ fn rows(
             host,
             vms_by_host.remove(&host.id).unwrap_or_default(),
             args,
+            empty_vm_label,
         ));
     }
     for (host, records) in vms_by_host {
@@ -351,7 +465,12 @@ fn rows(
     rows
 }
 
-fn host_rows(host: &Host, vms: Vec<&vm::VmRecord>, args: &BrowseOptions) -> Vec<Row> {
+fn host_rows(
+    host: &Host,
+    vms: Vec<&vm::VmRecord>,
+    args: &BrowseOptions,
+    empty_vm_label: &str,
+) -> Vec<Row> {
     let mut rows = vec![Row {
         host: host.id.clone(),
         attach: None,
@@ -373,7 +492,12 @@ fn host_rows(host: &Host, vms: Vec<&vm::VmRecord>, args: &BrowseOptions) -> Vec<
             rows.push(Row {
                 host: host.id.clone(),
                 attach: None,
-                label: "    no tmux sessions".into(),
+                label: if host.status == "loading" {
+                    "    loading sessions"
+                } else {
+                    "    no tmux sessions"
+                }
+                .into(),
             });
         } else {
             rows.extend(host.sessions.iter().map(|session| Row {
@@ -386,7 +510,7 @@ fn host_rows(host: &Host, vms: Vec<&vm::VmRecord>, args: &BrowseOptions) -> Vec<
             }));
         }
     }
-    rows.extend(vm_section_rows(&host.id, vms));
+    rows.extend(vm_section_rows(&host.id, vms, empty_vm_label));
     rows
 }
 
@@ -406,11 +530,11 @@ fn vm_only_host_rows(host: &str, vms: Vec<&vm::VmRecord>) -> Vec<Row> {
         attach: None,
         label: "    not discovered".into(),
     });
-    rows.extend(vm_section_rows(host, vms));
+    rows.extend(vm_section_rows(host, vms, "    no vms"));
     rows
 }
 
-fn vm_section_rows(host: &str, vms: Vec<&vm::VmRecord>) -> Vec<Row> {
+fn vm_section_rows(host: &str, vms: Vec<&vm::VmRecord>, empty_label: &str) -> Vec<Row> {
     let mut rows = vec![Row {
         host: host.into(),
         attach: None,
@@ -420,7 +544,7 @@ fn vm_section_rows(host: &str, vms: Vec<&vm::VmRecord>) -> Vec<Row> {
         rows.push(Row {
             host: host.into(),
             attach: None,
-            label: "    no vms".into(),
+            label: empty_label.into(),
         });
     } else {
         rows.extend(vms.into_iter().map(|record| Row {
@@ -457,7 +581,7 @@ fn vm_attach(id: &str) -> SessionTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{HostError, tmux};
+    use crate::{discovery::HostError, tmux};
     use std::{path::PathBuf, time::UNIX_EPOCH};
 
     fn snapshot() -> Snapshot {

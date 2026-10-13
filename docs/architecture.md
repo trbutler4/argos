@@ -123,6 +123,21 @@ and returns typed process outcomes. The TUI returns selections, and shared SSH
 policy lives in `ssh.rs`. This keeps CLI strings and picker protocol out of the
 low-level supervisor and avoids contradictory host/VM mode flags.
 
+`discovery.rs` supplies the same bounded probing core to CLI reads and the picker.
+The picker owns one refresh job, using scoped workers, an atomic cancellation
+flag, and a bounded channel. Completed hosts stream into the view while keyboard
+input remains on the UI thread. Refresh requests coalesce; selection is retained
+by typed target rather than row index. Job drop cancels and joins workers before
+handoff. The Linux captured-process runner holds the group leader until cleanup
+and uses nonblocking pipe reads, so inherited pipes cannot leave detached reader
+threads behind. Local VM scans check cancellation between records.
+
+VM persistence/schema handling lives in `vm/state.rs`, and guest SSH preparation
+and first-use trust live in `vm/guest.rs`. Lifecycle commands remain explicit in
+`vm.rs`. Process, SSH configuration, session preparation, and VM errors keep
+their useful categories until presentation; no generic backend or task framework
+is required for these boundaries.
+
 ## 4. A managed task environment
 
 Each environment has a stable ID, a display name, a home machine, a project URL,

@@ -1,9 +1,13 @@
 use crate::{config, host};
+mod guest;
+mod state;
+pub(crate) use guest::prepare_guest_command;
 use serde::{Deserialize, Serialize};
+pub(crate) use state::{VmPortMapping, VmRecord, VmSnapshot, valid_id};
+use state::{load_record, load_snapshot, load_vms, state_root, validate_record, write_record};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::IsTerminal,
     io::Read,
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
@@ -14,77 +18,8 @@ use std::{
 const NIXPKGS_URL: &str = "github:NixOS/nixpkgs/dc5d91f840324650bac8c379428c7037a416959a";
 const MICROVM_URL: &str = "github:microvm-nix/microvm.nix/614e9541186d724438edfd91c3bbc8474dd1b76e";
 const START_READY_TIMEOUT: Duration = Duration::from_secs(45);
-const SSH_KEYSCAN_TIMEOUT: Duration = Duration::from_secs(15);
 const APP_PORT_START: u16 = 43000;
 const APP_PORT_END: u16 = 45999;
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct VmSnapshot {
-    pub(crate) schema_version: u32,
-    pub(crate) observed_at_unix_ms: u64,
-    pub(crate) state_root: String,
-    pub(crate) vms: Vec<VmRecord>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct VmRecord {
-    pub(crate) schema_version: u32,
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) status: String,
-    pub(crate) host: String,
-    #[serde(default)]
-    pub(crate) project: Option<String>,
-    #[serde(default)]
-    pub(crate) source_repo: Option<String>,
-    #[serde(default)]
-    pub(crate) profile_path: Option<String>,
-    #[serde(default)]
-    pub(crate) guest_workdir: Option<String>,
-    #[serde(default)]
-    pub(crate) packages: Vec<String>,
-    #[serde(default)]
-    pub(crate) ports: Vec<VmPortMapping>,
-    #[serde(default)]
-    pub(crate) repo_path: Option<String>,
-    #[serde(default)]
-    pub(crate) workdir: Option<String>,
-    #[serde(default)]
-    pub(crate) instance_dir: Option<String>,
-    #[serde(default)]
-    pub(crate) flake_path: Option<String>,
-    #[serde(default)]
-    pub(crate) microvm_config: Option<String>,
-    #[serde(default)]
-    pub(crate) runner_path: Option<String>,
-    #[serde(default)]
-    pub(crate) log_path: Option<String>,
-    #[serde(default)]
-    pub(crate) pid: Option<u32>,
-    #[serde(default)]
-    pub(crate) console_session: Option<String>,
-    #[serde(default)]
-    pub(crate) ssh_host: Option<String>,
-    #[serde(default)]
-    pub(crate) ssh_port: Option<u16>,
-    #[serde(default)]
-    pub(crate) ssh_user: Option<String>,
-    #[serde(default)]
-    pub(crate) created_at_unix_ms: Option<u64>,
-    #[serde(default)]
-    pub(crate) updated_at_unix_ms: Option<u64>,
-    #[serde(default)]
-    pub(crate) started_at_unix_ms: Option<u64>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct VmPortMapping {
-    pub(crate) name: String,
-    pub(crate) guest: u16,
-    pub(crate) host: u16,
-}
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -215,10 +150,17 @@ struct VmUpOutput {
 }
 
 #[derive(Debug)]
-struct VmError {
-    code: &'static str,
-    message: String,
+pub(crate) struct VmError {
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
 }
+
+impl std::fmt::Display for VmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+impl std::error::Error for VmError {}
 
 struct TaskVmIdentity {
     project: String,
@@ -338,9 +280,15 @@ pub(crate) struct GuestCommandOptions {
     pub(crate) mode: crate::sessions::GuestMode,
 }
 
-pub(crate) fn snapshot(state_dir: Option<PathBuf>) -> Result<VmSnapshot, String> {
-    let state_root = state_root(state_dir).map_err(|error| error.message)?;
-    load_snapshot(&state_root).map_err(|error| format!("{}: {}", error.code, error.message))
+pub(crate) fn snapshot(state_dir: Option<PathBuf>) -> Result<VmSnapshot, VmError> {
+    load_snapshot(&state_root(state_dir)?)
+}
+
+pub(crate) fn snapshot_cancellable(
+    state_dir: Option<PathBuf>,
+    cancel: &crate::process::Cancellation,
+) -> Result<VmSnapshot, VmError> {
+    state::load_snapshot_cancellable(&state_root(state_dir)?, cancel)
 }
 
 pub(crate) fn list(json: bool, detailed: bool, state_dir: Option<PathBuf>) -> ExitCode {
@@ -1383,16 +1331,6 @@ fn remove_dir_if_exists(path: &Path, label: &str) -> Result<(), VmError> {
     })
 }
 
-fn state_root(override_dir: Option<PathBuf>) -> Result<PathBuf, VmError> {
-    if let Some(path) = override_dir {
-        if !path.is_absolute() {
-            return Err(invalid_args("--state-dir must be absolute"));
-        }
-        return Ok(path);
-    }
-    Ok(host::state_root())
-}
-
 struct LoadedProfile {
     profile: RepoProfile,
     path: Option<PathBuf>,
@@ -1683,87 +1621,6 @@ fn apply_default_cloned_profile(output: &mut VmCreateOutput) -> Result<(), VmErr
     Ok(())
 }
 
-fn load_snapshot(state_root: &Path) -> Result<VmSnapshot, VmError> {
-    let mut vms = load_vms(&state_root.join("vms"))?;
-    vms.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(VmSnapshot {
-        schema_version: 1,
-        observed_at_unix_ms: now_ms(),
-        state_root: state_root.display().to_string(),
-        vms,
-    })
-}
-
-fn load_vms(dir: &Path) -> Result<Vec<VmRecord>, VmError> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(state_error(format!(
-                "cannot read VM state directory {}: {error}",
-                dir.display()
-            )));
-        }
-    };
-    let mut records = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            state_error(format!(
-                "cannot read VM state entry in {}: {error}",
-                dir.display()
-            ))
-        })?;
-        let path = entry.path();
-        if !path.is_file() || path.extension().is_none_or(|ext| ext != "json") {
-            continue;
-        }
-        let text = fs::read_to_string(&path).map_err(|error| {
-            state_error(format!("cannot read VM state {}: {error}", path.display()))
-        })?;
-        let record: VmRecord = serde_json::from_str(&text).map_err(|error| VmError {
-            code: "invalid_state",
-            message: format!("invalid VM state {}: {error}", path.display()),
-        })?;
-        validate_record(&record, &path)?;
-        records.push(record);
-    }
-    Ok(records)
-}
-
-fn load_record(path: &Path) -> Result<VmRecord, VmError> {
-    let text = fs::read_to_string(path).map_err(|error| match error.kind() {
-        std::io::ErrorKind::NotFound => VmError {
-            code: "not_found",
-            message: format!("VM state does not exist: {}", path.display()),
-        },
-        _ => state_error(format!("cannot read VM state {}: {error}", path.display())),
-    })?;
-    let record: VmRecord = serde_json::from_str(&text).map_err(|error| VmError {
-        code: "invalid_state",
-        message: format!("invalid VM state {}: {error}", path.display()),
-    })?;
-    validate_record(&record, path)?;
-    Ok(record)
-}
-
-fn write_record(path: &Path, record: &VmRecord) -> Result<(), VmError> {
-    validate_record(record, path)?;
-    let json = serde_json::to_string_pretty(record).unwrap();
-    let temp = path.with_extension("json.tmp");
-    fs::write(&temp, format!("{json}\n")).map_err(|error| {
-        state_error(format!(
-            "cannot write temporary VM state {}: {error}",
-            temp.display()
-        ))
-    })?;
-    fs::rename(&temp, path).map_err(|error| {
-        state_error(format!(
-            "cannot publish VM state {}: {error}",
-            path.display()
-        ))
-    })
-}
-
 fn build_runner(instance_dir: &Path) -> Result<PathBuf, VmError> {
     let out_link = instance_dir.join("runner");
     let status = Command::new("nix")
@@ -1786,82 +1643,6 @@ fn build_runner(instance_dir: &Path) -> Result<PathBuf, VmError> {
         });
     }
     Ok(out_link)
-}
-
-pub(crate) fn prepare_guest_command(options: GuestCommandOptions) -> Result<Command, String> {
-    guest_command_plan(options).map_err(|e| format!("{}: {}", e.code, e.message))
-}
-
-fn guest_command_plan(options: GuestCommandOptions) -> Result<Command, VmError> {
-    if !valid_id(&options.id) {
-        return Err(invalid_args(
-            "VM id must be 1-64 chars of letters, digits, '_' or '-'",
-        ));
-    }
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        return Err(VmError {
-            code: "shell_error",
-            message: "guest shell requires a terminal on stdin and stdout".into(),
-        });
-    }
-    let state_root = state_root(options.state_dir)?;
-    let state_file = state_root.join("vms").join(format!("{}.json", options.id));
-    let record = load_record(&state_file)?;
-    if record.status != "running" {
-        return Err(VmError {
-            code: "not_running",
-            message: format!("VM is not running: {}", record.id),
-        });
-    }
-    let host = record.ssh_host.as_deref().unwrap_or("127.0.0.1");
-    let user = record.ssh_user.as_deref().unwrap_or("root");
-    let port = record
-        .ssh_port
-        .unwrap_or_else(|| ssh_port_for_id(&record.id));
-    let instance_dir = record
-        .instance_dir
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| state_root.join("instances").join(&record.id));
-    let known_hosts = instance_dir.join("known_hosts");
-    // Preserve the existing first-use enrollment, but never replace recorded
-    // trust while reconnecting. A changed key must fail strict SSH verification.
-    if !known_hosts.exists() {
-        refresh_guest_known_hosts(&record, &instance_dir)?;
-    }
-    let destination = format!("{user}@{host}");
-    let mut command = crate::ssh::interactive_command();
-    command
-        .args(["-p", &port.to_string()])
-        .args([
-            "-o",
-            &format!("UserKnownHostsFile={}", known_hosts.display()),
-        ])
-        .arg(destination);
-    crate::ssh::validate_command(&command).map_err(|message| VmError {
-        code: "ssh_error",
-        message,
-    })?;
-    let guest_workdir = record.guest_workdir.as_deref().unwrap_or("/workspace/repo");
-    let workspace_prefix = format!(
-        "cd {} 2>/dev/null || cd /workspace/repo 2>/dev/null || cd /workspace 2>/dev/null || cd",
-        shell_quote(guest_workdir)
-    );
-    if options.mode == crate::sessions::GuestMode::Tmux {
-        command.arg(format!(
-            "{workspace_prefix}; unset ARGOS_CONNECT_CLIENT; \
-             cfg=/dev/null; if [ -f /etc/tmux.conf ]; then cfg=/etc/tmux.conf; fi; \
-             tmux -u -f \"$cfg\" has-session -t '=main' 2>/dev/null || \
-             tmux -u -f \"$cfg\" new-session -d -s main || \
-             tmux -u -f \"$cfg\" has-session -t '=main' || exit 1; \
-             ARGOS_CONNECT_CLIENT=1 exec tmux -u -N -f \"$cfg\" attach-session -E -t '=main'"
-        ));
-    } else {
-        command.arg(format!(
-            "{workspace_prefix}; exec ${{SHELL:-/run/current-system/sw/bin/sh}} -l"
-        ));
-    }
-    Ok(command)
 }
 
 fn wait_for_ready(session: &str, log_path: &Path, id: &str) -> Result<(), VmError> {
@@ -1892,92 +1673,6 @@ fn wait_for_ready(session: &str, log_path: &Path, id: &str) -> Result<(), VmErro
         }
         thread::sleep(Duration::from_millis(200));
     }
-}
-
-fn refresh_guest_known_hosts(record: &VmRecord, instance_dir: &Path) -> Result<(), VmError> {
-    let host = record.ssh_host.as_deref().unwrap_or("127.0.0.1");
-    let port = record
-        .ssh_port
-        .unwrap_or_else(|| ssh_port_for_id(&record.id));
-    let known_hosts = instance_dir.join("known_hosts");
-    let start = SystemTime::now();
-
-    loop {
-        match scan_guest_host_key(host, port) {
-            Ok(keys) => {
-                fs::create_dir_all(instance_dir).map_err(|error| {
-                    state_error(format!(
-                        "cannot create VM instance directory {}: {error}",
-                        instance_dir.display()
-                    ))
-                })?;
-                let temp = known_hosts.with_extension("known_hosts.tmp");
-                fs::write(&temp, keys).map_err(|error| {
-                    state_error(format!(
-                        "cannot write temporary known_hosts {}: {error}",
-                        temp.display()
-                    ))
-                })?;
-                fs::rename(&temp, &known_hosts).map_err(|error| {
-                    state_error(format!(
-                        "cannot publish known_hosts {}: {error}",
-                        known_hosts.display()
-                    ))
-                })?;
-                return Ok(());
-            }
-            Err(error) => {
-                if start.elapsed().unwrap_or_else(|_| Duration::from_secs(0)) > SSH_KEYSCAN_TIMEOUT
-                {
-                    return Err(error);
-                }
-            }
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-}
-
-fn scan_guest_host_key(host: &str, port: u16) -> Result<String, VmError> {
-    let args = ssh_keyscan_args(host, port);
-    let output = Command::new("ssh-keyscan")
-        .args(&args)
-        .output()
-        .map_err(|error| VmError {
-            code: "ssh_error",
-            message: format!("cannot execute ssh-keyscan: {error}"),
-        })?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let keys = stdout
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !trimmed.is_empty() && !trimmed.starts_with('#')
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    if keys.is_empty() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(VmError {
-            code: "ssh_error",
-            message: format!(
-                "could not scan guest SSH host key on {host}:{port}: {}",
-                stderr.trim()
-            ),
-        });
-    }
-    Ok(format!("{keys}\n"))
-}
-
-fn ssh_keyscan_args(host: &str, port: u16) -> Vec<String> {
-    vec![
-        "-T".into(),
-        "5".into(),
-        "-t".into(),
-        "ed25519".into(),
-        "-p".into(),
-        port.to_string(),
-        host.into(),
-    ]
 }
 
 fn start_tmux_console(session: &str, instance_dir: &Path, script: &str) -> Result<(), VmError> {
@@ -2109,58 +1804,6 @@ fn wait_for_exit(pid: u32, timeout: Duration) {
     }
 }
 
-fn validate_record(record: &VmRecord, path: &Path) -> Result<(), VmError> {
-    if record.schema_version != 1 {
-        return Err(invalid(path, "unsupported schema_version"));
-    }
-    for (field, value) in [
-        ("id", record.id.as_str()),
-        ("name", record.name.as_str()),
-        ("status", record.status.as_str()),
-        ("host", record.host.as_str()),
-    ] {
-        if value.is_empty() || value.chars().any(|c| c == '\0' || c.is_control()) {
-            return Err(invalid(path, &format!("invalid {field}")));
-        }
-    }
-    if !valid_id(&record.id) {
-        return Err(invalid(path, "invalid id"));
-    }
-    if let Some(workdir) = &record.guest_workdir
-        && (!workdir.starts_with('/') || workdir.chars().any(|c| c == '\0' || c.is_control()))
-    {
-        return Err(invalid(path, "invalid guest_workdir"));
-    }
-    let mut packages = BTreeSet::new();
-    for package in &record.packages {
-        if !valid_package_attr(package) || !packages.insert(package) {
-            return Err(invalid(path, "invalid package"));
-        }
-    }
-    let mut port_names = BTreeSet::new();
-    let mut guest_ports = BTreeSet::new();
-    let mut host_ports = BTreeSet::new();
-    for mapping in &record.ports {
-        if !valid_port_name(&mapping.name)
-            || mapping.guest == 0
-            || mapping.host == 0
-            || !port_names.insert(mapping.name.as_str())
-            || !guest_ports.insert(mapping.guest)
-            || !host_ports.insert(mapping.host)
-        {
-            return Err(invalid(path, "invalid port mapping"));
-        }
-    }
-    Ok(())
-}
-
-fn invalid(path: &Path, reason: &str) -> VmError {
-    VmError {
-        code: "invalid_state",
-        message: format!("invalid VM state {}: {reason}", path.display()),
-    }
-}
-
 fn invalid_args(message: &str) -> VmError {
     VmError {
         code: "invalid_args",
@@ -2173,14 +1816,6 @@ fn state_error(message: String) -> VmError {
         code: "state_error",
         message,
     }
-}
-
-pub(crate) fn valid_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 fn slug(value: &str) -> String {
@@ -2553,6 +2188,19 @@ fn render_instance_flake() -> String {
     )
 }
 
+fn guest_hostname(id: &str) -> String {
+    // State IDs may contain underscores and have 64 characters. The derived
+    // hostname has a separate DNS/NixOS limit; never rename the persisted ID.
+    let label = id.replace('_', "-");
+    let label: String = label.trim_matches('-').chars().take(57).collect();
+    let label = label.trim_end_matches('-');
+    if label.is_empty() {
+        "argos-vm".into()
+    } else {
+        format!("argos-{label}")
+    }
+}
+
 fn render_microvm_config(
     record: &VmRecord,
     tmux_config: Option<&str>,
@@ -2641,7 +2289,7 @@ fn render_microvm_config(
   }};
 }}
 "#,
-        host = serde_json::to_string(&format!("argos-{}", record.id)).unwrap(),
+        host = serde_json::to_string(&guest_hostname(&record.id)).unwrap(),
         id = record.id,
         keys = keys,
         mac = serde_json::to_string(&mac).unwrap(),
@@ -2945,6 +2593,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn accepted_ids_produce_valid_guest_hostnames() {
+        assert_eq!(guest_hostname("work-one"), "argos-work-one");
+        for id in [
+            "trailing_".to_owned(),
+            "___".to_owned(),
+            "x".repeat(64),
+            format!("{}-end", "x".repeat(56)),
+        ] {
+            assert!(valid_id(&id));
+            let hostname = guest_hostname(&id);
+            assert!(hostname.len() <= 63);
+            assert!(hostname.as_bytes().last().unwrap().is_ascii_alphanumeric());
+            assert!(
+                hostname
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            );
+        }
+    }
+
+    #[test]
     fn validates_ids() {
         assert!(valid_id("trade-feature_1"));
         assert!(!valid_id("bad/slash"));
@@ -2991,14 +2660,6 @@ mod tests {
         if Path::new(root).exists() {
             assert_eq!(paths, vec![root.to_string()]);
         }
-    }
-
-    #[test]
-    fn scans_only_guest_ed25519_host_key() {
-        assert_eq!(
-            ssh_keyscan_args("127.0.0.1", 32026),
-            vec!["-T", "5", "-t", "ed25519", "-p", "32026", "127.0.0.1"]
-        );
     }
 
     #[test]
