@@ -1,4 +1,5 @@
-use crate::{Host, Snapshot, SnapshotRequest, discover_snapshot, sessions, snapshot_request, vm};
+use crate::sessions::{BrowseOptions, GuestMode, HostLocation, SessionTarget};
+use crate::{Host, Snapshot, SnapshotRequest, discover_snapshot, vm};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
@@ -15,87 +16,38 @@ use ratatui::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, Stdout},
-    path::PathBuf,
-    process::ExitCode,
     time::Duration,
 };
 
-pub(crate) fn run(
-    socket: Option<String>,
-    config: Option<PathBuf>,
-    host: Option<String>,
-    local: bool,
-    state_dir: Option<PathBuf>,
-) -> ExitCode {
-    crate::connect::run(
-        None,
-        sessions::AttachOptions {
-            target: String::new(),
-            socket,
-            config_path: config,
-            host,
-            local,
-            state_dir,
-            vm_shell: false,
-        },
-    )
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TuiArgs {
-    socket: Option<String>,
-    config: Option<PathBuf>,
-    host: Option<String>,
-    local: bool,
-    state_dir: Option<PathBuf>,
-}
-
 #[cfg(target_os = "linux")]
 pub(crate) enum PickResult {
-    Select(sessions::AttachOptions),
+    Select(SessionTarget),
     Retry,
     Quit(u8),
 }
 
 #[cfg(target_os = "linux")]
 pub(crate) fn pick_session(
-    options: &sessions::AttachOptions,
-    previous: Option<&sessions::AttachOptions>,
+    request: SnapshotRequest,
+    options: &BrowseOptions,
+    previous: Option<&SessionTarget>,
     error: Option<&str>,
-    owner: &mut crate::connect::TerminalOwner,
+    owner: &mut crate::terminal::TerminalOwner,
 ) -> io::Result<PickResult> {
-    let args = TuiArgs {
-        socket: options.socket.clone(),
-        config: options.config_path.clone(),
-        host: options.host.clone(),
-        local: options.local,
-        state_dir: options.state_dir.clone(),
-    };
-    let request = snapshot_request(
-        args.socket.clone(),
-        args.config.clone(),
-        args.host.clone(),
-        args.local,
-    )
-    .map_err(|(message, _)| io::Error::other(message))?;
-    for (_, alias, _) in &request.machines {
-        if let Some(alias) = alias {
-            sessions::validate_managed_transport(alias).map_err(io::Error::other)?;
-        }
-    }
-    let mut app = App::new(request, args);
-    app.notice = Some(match error {
+    let mut app = App::new(request, options.clone());
+    let mut notice = match error {
         Some(error) => {
             format!("Connection failed: {error}\nEnter choose | R retry last target | q quit")
         }
         None => "Origin-side session picker. Enter connect | q quit".into(),
-    });
+    };
     if let Some(previous) = previous {
-        app.notice.as_mut().unwrap().push_str(&format!(
+        notice.push_str(&format!(
             "\nEsc reconnects last Argos-selected target: {:?} (not native tmux switches)",
-            previous.target
+            previous.to_string()
         ));
     }
+    app.notice = Some(notice);
     let mut terminal = TerminalGuard::enter()?;
     app.refresh();
     loop {
@@ -120,7 +72,7 @@ pub(crate) fn pick_session(
                 }
                 _ => {
                     if let Some(Action::Attach(attach)) = app.handle_key(key) {
-                        return Ok(PickResult::Select(attach.into()));
+                        return Ok(PickResult::Select(attach));
                     }
                 }
             }
@@ -128,70 +80,59 @@ pub(crate) fn pick_session(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PendingAttach {
-    target: String,
-    socket: Option<String>,
-    config_path: Option<PathBuf>,
-    host: Option<String>,
-    local: bool,
-    state_dir: Option<PathBuf>,
-}
-
-impl From<PendingAttach> for sessions::AttachOptions {
-    fn from(attach: PendingAttach) -> Self {
-        Self {
-            target: attach.target,
-            socket: attach.socket,
-            config_path: attach.config_path,
-            host: attach.host,
-            local: attach.local,
-            state_dir: attach.state_dir,
-            vm_shell: false,
-        }
-    }
-}
-
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    _screen: ScreenGuard,
 }
 
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
-        let backend = CrosstermBackend::new(stdout);
+        let screen = ScreenGuard::enter()?;
+        let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
-        Ok(Self { terminal })
+        Ok(Self {
+            terminal,
+            _screen: screen,
+        })
     }
 }
 
-impl Drop for TerminalGuard {
+// Own modes before fallible backend initialization, so partial setup rolls back.
+struct ScreenGuard;
+
+impl ScreenGuard {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        let guard = Self;
+        execute!(io::stdout(), EnterAlternateScreen)?;
+        Ok(guard)
+    }
+}
+
+impl Drop for ScreenGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
-        let _ = self.terminal.show_cursor();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
     Quit,
-    Attach(PendingAttach),
+    Attach(SessionTarget),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Row {
     host: String,
-    attach: Option<PendingAttach>,
+    attach: Option<SessionTarget>,
     label: String,
 }
 
 struct App {
     request: SnapshotRequest,
-    args: TuiArgs,
+    args: BrowseOptions,
     snapshot: Snapshot,
     vm_snapshot: Option<vm::VmSnapshot>,
     vm_error: Option<String>,
@@ -202,7 +143,7 @@ struct App {
 }
 
 impl App {
-    fn new(request: SnapshotRequest, args: TuiArgs) -> Self {
+    fn new(request: SnapshotRequest, args: BrowseOptions) -> Self {
         Self {
             request,
             args,
@@ -358,7 +299,7 @@ impl App {
             .and_then(|row| {
                 row.attach
                     .as_ref()
-                    .map(|attach| format!(" selected {}", attach.target))
+                    .map(|attach| format!(" selected {attach}"))
             })
             .unwrap_or_default();
         let footer = Paragraph::new(format!(
@@ -374,7 +315,7 @@ fn rows(
     snapshot: &Snapshot,
     vm_snapshot: Option<&vm::VmSnapshot>,
     vm_error: Option<&str>,
-    args: &TuiArgs,
+    args: &BrowseOptions,
 ) -> Vec<Row> {
     let mut vms_by_host: BTreeMap<String, Vec<&vm::VmRecord>> = BTreeMap::new();
     if let Some(vm_snapshot) = vm_snapshot {
@@ -397,7 +338,7 @@ fn rows(
     }
     for (host, records) in vms_by_host {
         if rendered_hosts.insert(host.clone()) {
-            rows.extend(vm_only_host_rows(&host, records, args));
+            rows.extend(vm_only_host_rows(&host, records));
         }
     }
     if let Some(error) = vm_error {
@@ -410,7 +351,7 @@ fn rows(
     rows
 }
 
-fn host_rows(host: &Host, vms: Vec<&vm::VmRecord>, args: &TuiArgs) -> Vec<Row> {
+fn host_rows(host: &Host, vms: Vec<&vm::VmRecord>, args: &BrowseOptions) -> Vec<Row> {
     let mut rows = vec![Row {
         host: host.id.clone(),
         attach: None,
@@ -445,11 +386,11 @@ fn host_rows(host: &Host, vms: Vec<&vm::VmRecord>, args: &TuiArgs) -> Vec<Row> {
             }));
         }
     }
-    rows.extend(vm_section_rows(&host.id, vms, args));
+    rows.extend(vm_section_rows(&host.id, vms));
     rows
 }
 
-fn vm_only_host_rows(host: &str, vms: Vec<&vm::VmRecord>, args: &TuiArgs) -> Vec<Row> {
+fn vm_only_host_rows(host: &str, vms: Vec<&vm::VmRecord>) -> Vec<Row> {
     let mut rows = vec![Row {
         host: host.into(),
         attach: None,
@@ -465,11 +406,11 @@ fn vm_only_host_rows(host: &str, vms: Vec<&vm::VmRecord>, args: &TuiArgs) -> Vec
         attach: None,
         label: "    not discovered".into(),
     });
-    rows.extend(vm_section_rows(host, vms, args));
+    rows.extend(vm_section_rows(host, vms));
     rows
 }
 
-fn vm_section_rows(host: &str, vms: Vec<&vm::VmRecord>, args: &TuiArgs) -> Vec<Row> {
+fn vm_section_rows(host: &str, vms: Vec<&vm::VmRecord>) -> Vec<Row> {
     let mut rows = vec![Row {
         host: host.into(),
         attach: None,
@@ -484,43 +425,32 @@ fn vm_section_rows(host: &str, vms: Vec<&vm::VmRecord>, args: &TuiArgs) -> Vec<R
     } else {
         rows.extend(vms.into_iter().map(|record| Row {
             host: host.into(),
-            attach: Some(vm_attach(&record.id, args)),
+            attach: Some(vm_attach(&record.id)),
             label: format!("    {} ({})  vm:{}", record.name, record.status, record.id),
         }));
     }
     rows
 }
 
-fn host_attach(host: &str, session_id: &str, args: &TuiArgs) -> PendingAttach {
-    if args.local || args.socket.is_some() {
-        PendingAttach {
-            target: session_id.into(),
-            socket: args.socket.clone(),
-            config_path: None,
-            host: None,
-            local: args.local,
-            state_dir: None,
-        }
-    } else {
-        PendingAttach {
-            target: format!("host:{host}:{session_id}"),
-            socket: None,
-            config_path: args.config.clone(),
-            host: None,
-            local: false,
-            state_dir: None,
-        }
+fn host_attach(host: &str, session_id: &str, args: &BrowseOptions) -> SessionTarget {
+    SessionTarget::HostTmux {
+        session: session_id.into(),
+        location: if args.local || args.socket.is_some() {
+            HostLocation::Local {
+                socket: args.socket.clone(),
+            }
+        } else {
+            HostLocation::Inventory {
+                machine: Some(host.into()),
+            }
+        },
     }
 }
 
-fn vm_attach(id: &str, args: &TuiArgs) -> PendingAttach {
-    PendingAttach {
-        target: format!("vm:{id}"),
-        socket: None,
-        config_path: args.config.clone(),
-        host: None,
-        local: false,
-        state_dir: args.state_dir.clone(),
+fn vm_attach(id: &str) -> SessionTarget {
+    SessionTarget::Vm {
+        id: id.into(),
+        mode: GuestMode::Tmux,
     }
 }
 
@@ -528,7 +458,7 @@ fn vm_attach(id: &str, args: &TuiArgs) -> PendingAttach {
 mod tests {
     use super::*;
     use crate::{HostError, tmux};
-    use std::time::UNIX_EPOCH;
+    use std::{path::PathBuf, time::UNIX_EPOCH};
 
     fn snapshot() -> Snapshot {
         Snapshot {
@@ -595,10 +525,10 @@ mod tests {
         }
     }
 
-    fn args() -> TuiArgs {
-        TuiArgs {
+    fn args() -> BrowseOptions {
+        BrowseOptions {
             socket: None,
-            config: Some(PathBuf::from("config.local.toml")),
+            config_path: Some(PathBuf::from("config.local.toml")),
             host: None,
             local: false,
             state_dir: None,
@@ -627,20 +557,33 @@ mod tests {
             .find_map(|row| {
                 row.attach
                     .as_ref()
-                    .filter(|attach| attach.target.starts_with("host:"))
+                    .filter(|attach| matches!(attach, SessionTarget::HostTmux { .. }))
             })
             .unwrap();
-        assert_eq!(host.target, "host:local:$1");
-        assert_eq!(host.config_path, Some(PathBuf::from("config.local.toml")));
+        assert_eq!(
+            host,
+            &SessionTarget::HostTmux {
+                session: "$1".into(),
+                location: HostLocation::Inventory {
+                    machine: Some("local".into())
+                }
+            }
+        );
         let vm = rows
             .iter()
             .find_map(|row| {
                 row.attach
                     .as_ref()
-                    .filter(|attach| attach.target == "vm:test")
+                    .filter(|attach| matches!(attach, SessionTarget::Vm { .. }))
             })
             .unwrap();
-        assert_eq!(vm.config_path, Some(PathBuf::from("config.local.toml")));
+        assert_eq!(
+            vm,
+            &SessionTarget::Vm {
+                id: "test".into(),
+                mode: GuestMode::Tmux
+            }
+        );
     }
 
     #[test]
@@ -648,8 +591,15 @@ mod tests {
         let mut args = args();
         args.socket = Some("/tmp/tmux.sock".into());
         let attach = host_attach("local", "$1", &args);
-        assert_eq!(attach.target, "$1");
-        assert_eq!(attach.socket.as_deref(), Some("/tmp/tmux.sock"));
+        assert_eq!(
+            attach,
+            SessionTarget::HostTmux {
+                session: "$1".into(),
+                location: HostLocation::Local {
+                    socket: Some("/tmp/tmux.sock".into())
+                }
+            }
+        );
     }
 
     #[test]

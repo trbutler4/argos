@@ -1,11 +1,12 @@
-use crate::{config, tmux, vm};
+use crate::{config, ssh, tmux, vm};
+use std::fmt;
 use std::path::PathBuf;
-use std::process::{Command, ExitCode};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 #[derive(Debug, PartialEq, Eq)]
 struct AttachTarget {
-    id: String,
+    location: HostLocation,
     socket: Option<String>,
     ssh_alias: Option<String>,
 }
@@ -22,99 +23,169 @@ fn select<'a>(sessions: &'a [tmux::Session], query: &str) -> Result<&'a tmux::Se
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct AttachOptions {
-    pub(crate) target: String,
+/// Discovery preferences are independent of the selected attachment.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BrowseOptions {
     pub(crate) socket: Option<String>,
     pub(crate) config_path: Option<PathBuf>,
     pub(crate) host: Option<String>,
     pub(crate) local: bool,
     pub(crate) state_dir: Option<PathBuf>,
-    pub(crate) vm_shell: bool,
 }
 
-pub(crate) fn attach(options: AttachOptions) -> ExitCode {
-    crate::connect::run(Some(options.target.clone()), options)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HostLocation {
+    Local { socket: Option<String> },
+    Inventory { machine: Option<String> },
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum AttachSpec {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GuestMode {
+    Tmux,
+    Shell,
+}
+
+/// Parsed once at entry; the picker constructs these directly from its model.
+/// A host target cannot accidentally acquire VM shell mode or VM state flags.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SessionTarget {
     Vm {
         id: String,
+        mode: GuestMode,
     },
     HostTmux {
         session: String,
-        host: Option<String>,
+        location: HostLocation,
     },
 }
 
-fn parse_attach_spec(target: &str, explicit_host: Option<&str>) -> Result<AttachSpec, String> {
-    if let Some(id) = target.strip_prefix("vm:") {
-        if id.is_empty() {
-            return Err("vm session target must be vm:<id>".into());
+impl SessionTarget {
+    pub(crate) fn parse(target: &str, options: &BrowseOptions) -> Result<Self, String> {
+        let explicit_host = options.host.as_deref();
+        if let Some(id) = target.strip_prefix("vm:") {
+            if id.is_empty() {
+                return Err("vm session target must be vm:<id>".into());
+            }
+            if explicit_host.is_some() {
+                return Err("--host is not valid with vm:<id> session targets".into());
+            }
+            if options.socket.is_some() || options.local {
+                return Err("vm:<id> session targets only accept --config and --state-dir".into());
+            }
+            let target = Self::Vm {
+                id: id.into(),
+                mode: GuestMode::Tmux,
+            };
+            target.validate()?;
+            return Ok(target);
         }
-        if explicit_host.is_some() {
-            return Err("--host is not valid with vm:<id> session targets".into());
+        if let Some(rest) = target.strip_prefix("host:") {
+            let Some((host, session)) = rest.split_once(':') else {
+                return Err("host session target must be host:<host>:<session>".into());
+            };
+            if host.is_empty() || session.is_empty() {
+                return Err("host session target must be host:<host>:<session>".into());
+            }
+            if explicit_host.is_some() {
+                return Err("use either host:<host>:<session> or --host, not both".into());
+            }
+            if options.local || options.socket.is_some() {
+                return Err("host targets cannot be combined with --local or --socket".into());
+            }
+            return Ok(Self::HostTmux {
+                session: session.into(),
+                location: HostLocation::Inventory {
+                    machine: Some(host.into()),
+                },
+            });
         }
-        return Ok(AttachSpec::Vm { id: id.into() });
+        Ok(Self::HostTmux {
+            session: target.into(),
+            location: if options.local || options.socket.is_some() {
+                HostLocation::Local {
+                    socket: options.socket.clone(),
+                }
+            } else {
+                HostLocation::Inventory {
+                    machine: options.host.clone(),
+                }
+            },
+        })
     }
-    if let Some(rest) = target.strip_prefix("host:") {
-        let Some((host, session)) = rest.split_once(':') else {
-            return Err("host session target must be host:<host>:<session>".into());
-        };
-        if host.is_empty() || session.is_empty() {
-            return Err("host session target must be host:<host>:<session>".into());
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Vm { id, .. } if !vm::valid_id(id) => {
+                Err("VM id must be 1-64 chars of letters, digits, '_' or '-'".into())
+            }
+            _ => Ok(()),
         }
-        if explicit_host.is_some() {
-            return Err("use either host:<host>:<session> or --host, not both".into());
-        }
-        return Ok(AttachSpec::HostTmux {
-            session: session.into(),
-            host: Some(host.into()),
-        });
     }
-    Ok(AttachSpec::HostTmux {
-        session: target.into(),
-        host: explicit_host.map(str::to_owned),
-    })
+
+    pub(crate) fn requires_inventory(&self) -> bool {
+        matches!(
+            self,
+            Self::HostTmux {
+                location: HostLocation::Inventory { machine: Some(_) },
+                ..
+            }
+        )
+    }
+
+    pub(crate) fn uses_tmux(&self) -> bool {
+        !matches!(
+            self,
+            Self::Vm {
+                mode: GuestMode::Shell,
+                ..
+            }
+        )
+    }
 }
 
-pub(crate) fn validate_managed_target(options: &AttachOptions) -> Result<(), String> {
-    match parse_attach_spec(&options.target, options.host.as_deref())? {
-        AttachSpec::Vm { id } if !vm::valid_id(&id) => {
-            Err("VM id must be 1-64 chars of letters, digits, '_' or '-'".into())
+impl fmt::Display for SessionTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Vm { id, .. } => write!(f, "vm:{id}"),
+            Self::HostTmux {
+                location:
+                    HostLocation::Inventory {
+                        machine: Some(host),
+                    },
+                session,
+            } => write!(f, "host:{host}:{session}"),
+            Self::HostTmux { session, .. } => f.write_str(session),
         }
-        AttachSpec::Vm { .. } if options.socket.is_some() || options.local => {
-            Err("vm:<id> session targets only accept --config and --state-dir".into())
-        }
-        AttachSpec::HostTmux { host: Some(_), .. } if options.local || options.socket.is_some() => {
-            Err("host targets cannot be combined with --local or --socket".into())
-        }
-        _ => Ok(()),
     }
+}
+
+pub(crate) struct PreparedAttachment {
+    pub(crate) command: Command,
+    pub(crate) reconnect_target: SessionTarget,
 }
 
 /// Resolve targets and build commands. Only the connection owner executes them.
-pub(crate) fn prepare_managed(options: &mut AttachOptions) -> Result<Command, String> {
-    validate_managed_target(options)?;
-    let (session, host) = match parse_attach_spec(&options.target, options.host.as_deref())? {
-        AttachSpec::Vm { id } => {
-            return vm::prepare_guest_command(vm::GuestCommandOptions {
-                id,
+pub(crate) fn prepare(
+    target: &SessionTarget,
+    options: &BrowseOptions,
+) -> Result<PreparedAttachment, String> {
+    let (session, location) = match target {
+        SessionTarget::Vm { id, mode } => {
+            let command = vm::prepare_guest_command(vm::GuestCommandOptions {
+                id: id.clone(),
                 state_dir: options.state_dir.clone(),
-                tmux: !options.vm_shell,
+                mode: *mode,
+            })?;
+            return Ok(PreparedAttachment {
+                command,
+                reconnect_target: target.clone(),
             });
         }
-        AttachSpec::HostTmux { session, host } => (session, host),
+        SessionTarget::HostTmux { session, location } => (session, location),
     };
-    let target = resolve_target(
-        options.socket.clone(),
-        options.config_path.clone(),
-        host,
-        options.local,
-    )?;
+    let target = resolve_target(location, options.config_path.as_deref())?;
     if let Some(alias) = &target.ssh_alias {
-        validate_managed_transport(alias)?;
+        ssh::validate_destination(alias)?;
     }
     let sessions = tmux::discover(
         target.socket.as_deref(),
@@ -122,9 +193,9 @@ pub(crate) fn prepare_managed(options: &mut AttachOptions) -> Result<Command, St
         Duration::from_secs(3),
     )
     .map_err(|error| format!("{}: {}", error.code, error.message))?;
-    let selected = select(&sessions, &session)?;
+    let selected = select(&sessions, session)?;
     let command = if let Some(alias) = &target.ssh_alias {
-        let mut command = ssh_command();
+        let mut command = ssh::interactive_command();
         command.args([
             alias,
             &remote_attach_script(target.socket.as_deref(), &selected.id),
@@ -135,62 +206,31 @@ pub(crate) fn prepare_managed(options: &mut AttachOptions) -> Result<Command, St
         command.env("ARGOS_CONNECT_CLIENT", "1");
         command
     };
-    options.target = if options.local || options.socket.is_some() {
-        selected.id.clone()
-    } else {
-        format!("host:{}:{}", target.id, selected.id)
-    };
-    options.host = None;
-    Ok(command)
-}
-
-pub(crate) fn validate_managed_transport(alias: &str) -> Result<(), String> {
-    let mut command = ssh_command();
-    command.arg(alias);
-    validate_ssh_command(&command)
-}
-
-/// Inspect the exact destination/port/options before adding the remote command.
-pub(crate) fn validate_ssh_command(command: &Command) -> Result<(), String> {
-    let mut inspect = Command::new(command.get_program());
-    inspect
-        .arg("-G")
-        .args(command.get_args())
-        .env("LC_ALL", "C");
-    let output = tmux::process::run(inspect, Instant::now() + Duration::from_secs(3))
-        .map_err(|_| "cannot inspect SSH configuration".to_owned())?;
-    if !output.status.success() {
-        return Err(format!(
-            "cannot inspect SSH configuration: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if let Some((key, value)) = line.split_once(' ')
-            && matches!(key, "proxycommand" | "proxyjump")
-            && value != "none"
-        {
-            return Err("Argos connections do not yet support ProxyCommand or ProxyJump; use direct SSH inventory aliases".into());
-        }
-    }
-    Ok(())
+    Ok(PreparedAttachment {
+        command,
+        reconnect_target: SessionTarget::HostTmux {
+            session: selected.id.clone(),
+            location: target.location,
+        },
+    })
 }
 
 fn resolve_target(
-    socket: Option<String>,
-    config_path: Option<PathBuf>,
-    host: Option<String>,
-    local: bool,
+    location: &HostLocation,
+    config_path: Option<&std::path::Path>,
 ) -> Result<AttachTarget, String> {
-    if local || socket.is_some() {
-        return Ok(AttachTarget {
-            id: "local".into(),
-            socket,
-            ssh_alias: None,
-        });
-    }
+    let host = match location {
+        HostLocation::Local { socket } => {
+            return Ok(AttachTarget {
+                location: location.clone(),
+                socket: socket.clone(),
+                ssh_alias: None,
+            });
+        }
+        HostLocation::Inventory { machine } => machine.as_deref(),
+    };
     let loaded = match config_path {
-        Some(p) => config::load(&p).map(Some),
+        Some(p) => config::load(p).map(Some),
         None => config::default_path().map_or(Ok(None), |p| config::load_implicit(&p)),
     }?;
     let cfg = match loaded {
@@ -200,19 +240,21 @@ fn resolve_target(
                 return Err("--host requires a configured inventory".into());
             }
             return Ok(AttachTarget {
-                id: "local".into(),
+                location: HostLocation::Local { socket: None },
                 socket: None,
                 ssh_alias: None,
             });
         }
     };
-    let id = host.as_deref().unwrap_or(&cfg.client.machine_id);
+    let id = host.unwrap_or(&cfg.client.machine_id);
     let machine = cfg
         .machines
         .get(id)
         .ok_or_else(|| format!("unknown host id: {id}"))?;
     Ok(AttachTarget {
-        id: id.into(),
+        location: HostLocation::Inventory {
+            machine: Some(id.into()),
+        },
         socket: machine.socket.clone(),
         ssh_alias: machine.ssh_alias.clone(),
     })
@@ -226,31 +268,6 @@ fn local_tmux_command(socket: Option<&str>, target: &str) -> Command {
     }
     // Do not copy the managed client marker into shared session environment.
     command.args(["attach-session", "-E", "-t", target]);
-    command
-}
-
-pub(crate) fn ssh_command() -> Command {
-    let mut command = Command::new("ssh");
-    command.arg("-tt").env("LC_ALL", "C");
-    for option in [
-        "BatchMode=yes",
-        "StrictHostKeyChecking=yes",
-        "ClearAllForwardings=yes",
-        "ForwardAgent=no",
-        "PermitLocalCommand=no",
-        "ControlMaster=no",
-        "ControlPath=none",
-        "ControlPersist=no",
-        "ConnectTimeout=3",
-        "ConnectionAttempts=1",
-        "ServerAliveInterval=5",
-        "ServerAliveCountMax=2",
-        "EscapeChar=none",
-        "ForkAfterAuthentication=no",
-        "StdinNull=no",
-    ] {
-        command.args(["-o", option]);
-    }
     command
 }
 
@@ -276,27 +293,46 @@ mod tests {
     use super::*;
     #[test]
     fn parses_session_target_layers() {
+        let defaults = BrowseOptions::default();
         assert_eq!(
-            parse_attach_spec("vm:test", None).unwrap(),
-            AttachSpec::Vm { id: "test".into() }
-        );
-        assert_eq!(
-            parse_attach_spec("host:desktop:work", None).unwrap(),
-            AttachSpec::HostTmux {
-                session: "work".into(),
-                host: Some("desktop".into())
+            SessionTarget::parse("vm:test", &defaults).unwrap(),
+            SessionTarget::Vm {
+                id: "test".into(),
+                mode: GuestMode::Tmux
             }
         );
         assert_eq!(
-            parse_attach_spec("work", Some("desktop")).unwrap(),
-            AttachSpec::HostTmux {
+            SessionTarget::parse("host:desktop:work", &defaults).unwrap(),
+            SessionTarget::HostTmux {
                 session: "work".into(),
-                host: Some("desktop".into())
+                location: HostLocation::Inventory {
+                    machine: Some("desktop".into())
+                }
             }
         );
-        assert!(parse_attach_spec("vm:", None).is_err());
-        assert!(parse_attach_spec("vm:test", Some("desktop")).is_err());
-        assert!(parse_attach_spec("host:desktop", None).is_err());
+        let explicit = BrowseOptions {
+            host: Some("desktop".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            SessionTarget::parse("work", &explicit).unwrap(),
+            SessionTarget::HostTmux {
+                session: "work".into(),
+                location: HostLocation::Inventory {
+                    machine: Some("desktop".into())
+                }
+            }
+        );
+        assert!(SessionTarget::parse("vm:", &defaults).is_err());
+        assert!(SessionTarget::parse("vm:test", &explicit).is_err());
+        assert!(SessionTarget::parse("host:desktop", &defaults).is_err());
+        let local = BrowseOptions {
+            local: true,
+            ..Default::default()
+        };
+        assert!(SessionTarget::parse("vm:test", &local).is_err());
+        assert!(SessionTarget::parse("host:desktop:work", &local).is_err());
+        assert!(SessionTarget::parse("vm:../outside", &defaults).is_err());
     }
     #[test]
     fn exact_unambiguous_selection() {

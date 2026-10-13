@@ -335,7 +335,7 @@ pub(crate) struct RemoveOptions {
 pub(crate) struct GuestCommandOptions {
     pub(crate) id: String,
     pub(crate) state_dir: Option<PathBuf>,
-    pub(crate) tmux: bool,
+    pub(crate) mode: crate::sessions::GuestMode,
 }
 
 pub(crate) fn snapshot(state_dir: Option<PathBuf>) -> Result<VmSnapshot, String> {
@@ -530,15 +530,17 @@ pub(crate) fn up(options: UpOptions) -> ExitCode {
     if no_attach {
         ExitCode::SUCCESS
     } else {
-        crate::sessions::attach(crate::sessions::AttachOptions {
-            target: format!("vm:{id}"),
-            socket: None,
-            config_path,
-            host: None,
-            local: false,
-            state_dir,
-            vm_shell: false,
-        })
+        crate::connect::run_target(
+            Some(crate::sessions::SessionTarget::Vm {
+                id,
+                mode: crate::sessions::GuestMode::Tmux,
+            }),
+            crate::sessions::BrowseOptions {
+                config_path,
+                state_dir,
+                ..Default::default()
+            },
+        )
     }
 }
 
@@ -626,15 +628,16 @@ pub(crate) fn remove(options: RemoveOptions) -> ExitCode {
 }
 
 pub(crate) fn guest_command(options: GuestCommandOptions) -> ExitCode {
-    crate::sessions::attach(crate::sessions::AttachOptions {
-        target: format!("vm:{}", options.id),
-        socket: None,
-        config_path: None,
-        host: None,
-        local: false,
-        state_dir: options.state_dir,
-        vm_shell: !options.tmux,
-    })
+    crate::connect::run_target(
+        Some(crate::sessions::SessionTarget::Vm {
+            id: options.id,
+            mode: options.mode,
+        }),
+        crate::sessions::BrowseOptions {
+            state_dir: options.state_dir,
+            ..Default::default()
+        },
+    )
 }
 
 fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
@@ -1827,7 +1830,7 @@ fn guest_command_plan(options: GuestCommandOptions) -> Result<Command, VmError> 
         refresh_guest_known_hosts(&record, &instance_dir)?;
     }
     let destination = format!("{user}@{host}");
-    let mut command = crate::sessions::ssh_command();
+    let mut command = crate::ssh::interactive_command();
     command
         .args(["-p", &port.to_string()])
         .args([
@@ -1835,7 +1838,7 @@ fn guest_command_plan(options: GuestCommandOptions) -> Result<Command, VmError> 
             &format!("UserKnownHostsFile={}", known_hosts.display()),
         ])
         .arg(destination);
-    crate::sessions::validate_ssh_command(&command).map_err(|message| VmError {
+    crate::ssh::validate_command(&command).map_err(|message| VmError {
         code: "ssh_error",
         message,
     })?;
@@ -1844,7 +1847,7 @@ fn guest_command_plan(options: GuestCommandOptions) -> Result<Command, VmError> 
         "cd {} 2>/dev/null || cd /workspace/repo 2>/dev/null || cd /workspace 2>/dev/null || cd",
         shell_quote(guest_workdir)
     );
-    if options.tmux {
+    if options.mode == crate::sessions::GuestMode::Tmux {
         command.arg(format!(
             "{workspace_prefix}; unset ARGOS_CONNECT_CLIENT; \
              cfg=/dev/null; if [ -f /etc/tmux.conf ]; then cfg=/etc/tmux.conf; fi; \

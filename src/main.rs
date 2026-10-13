@@ -12,6 +12,8 @@ mod completions;
 mod config;
 #[cfg(target_os = "linux")]
 mod connect;
+#[cfg(target_os = "linux")]
+mod terminal;
 #[cfg(not(target_os = "linux"))]
 mod connect {
     pub(crate) fn check_origin() -> Result<(), String> {
@@ -19,14 +21,22 @@ mod connect {
     }
     pub(crate) fn run(
         _: Option<String>,
-        _: crate::sessions::AttachOptions,
+        _: crate::sessions::BrowseOptions,
     ) -> std::process::ExitCode {
         eprintln!("error: managed connect currently requires Linux");
         std::process::ExitCode::from(1)
     }
+    pub(crate) fn run_target(
+        _: Option<crate::sessions::SessionTarget>,
+        options: crate::sessions::BrowseOptions,
+    ) -> std::process::ExitCode {
+        run(None, options)
+    }
 }
 mod host;
+mod process;
 mod sessions;
+mod ssh;
 mod tmux;
 mod tui;
 mod vm;
@@ -424,14 +434,12 @@ fn main() -> ExitCode {
             state_dir,
         } => connect::run(
             target,
-            sessions::AttachOptions {
-                target: String::new(),
+            sessions::BrowseOptions {
                 socket,
                 config_path: config,
                 host,
                 local,
                 state_dir,
-                vm_shell: false,
             },
         ),
         Command::List {
@@ -456,15 +464,16 @@ fn main() -> ExitCode {
                 host,
                 local,
                 state_dir,
-            } => sessions::attach(sessions::AttachOptions {
-                target,
-                socket,
-                config_path: config,
-                host,
-                local,
-                state_dir,
-                vm_shell: false,
-            }),
+            } => connect::run(
+                Some(target),
+                sessions::BrowseOptions {
+                    socket,
+                    config_path: config,
+                    host,
+                    local,
+                    state_dir,
+                },
+            ),
         },
         Command::Tui {
             socket,
@@ -472,7 +481,16 @@ fn main() -> ExitCode {
             host,
             local,
             state_dir,
-        } => tui::run(socket, config, host, local, state_dir),
+        } => connect::run(
+            None,
+            sessions::BrowseOptions {
+                socket,
+                config_path: config,
+                host,
+                local,
+                state_dir,
+            },
+        ),
         Command::Host { command } => match command {
             HostCommand::Status { json } => host::status(json),
         },
@@ -621,12 +639,12 @@ fn main() -> ExitCode {
             VmCommand::Shell { id, state_dir } => vm::guest_command(vm::GuestCommandOptions {
                 id,
                 state_dir,
-                tmux: false,
+                mode: sessions::GuestMode::Shell,
             }),
             VmCommand::Tmux { id, state_dir } => vm::guest_command(vm::GuestCommandOptions {
                 id,
                 state_dir,
-                tmux: true,
+                mode: sessions::GuestMode::Tmux,
             }),
         },
         Command::Task { command } => match command {

@@ -50,7 +50,8 @@ def main():
     wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(shutil.which("ssh"))} -F {shlex.quote(str(ssh_config))} "$@"\n')
     wrapper.chmod(0o755)
     env["PATH"] = str(wrapper_dir) + os.pathsep + env["PATH"]
-    identifier = "connect-check-" + root.name.rsplit("-", 1)[1]
+    # tempfile suffixes may end in '_', which is not a valid NixOS hostname end.
+    identifier = "connect-check-" + root.name.rsplit("-", 1)[1].replace("_", "x")
     terminals = []
     created = False
 
@@ -116,6 +117,22 @@ def main():
         wait(lambda: first.process.poll() is not None, "VM detach did not finish")
         assert first.process.returncode == 0 and termios.tcgetattr(first.slave) == first.original
         assert known_hosts.read_bytes() == pinned_key
+
+        # A local-only picker and an explicit VM state root are independent of
+        # the selected VM target. No inventory or ambient state fallback is needed.
+        standalone = Terminal(
+            [str(BINARY), "sessions", "attach", f"vm:{identifier}", "--state-dir", str(state)],
+            dict(env, XDG_CONFIG_HOME=str(root / "no-inventory"), ARGOS_STATE_DIR=str(root / "wrong-state")),
+        )
+        terminals.append(standalone)
+        wait(lambda: client_count() == 1, "VM entry without inventory failed")
+        standalone.send(b"\x1b[24~")
+        wait(lambda: b"Origin-side" in standalone.output, "standalone VM picker failed")
+        standalone.send(b"\x1b")
+        wait(lambda: client_count() == 1, "standalone VM reconnect lost state root")
+        standalone.send(b"\x02d")
+        wait(lambda: standalone.process.poll() is not None, "standalone VM detach failed")
+        assert standalone.process.returncode == 0
 
         run("tmux", "-S", str(host_socket), "-f", "/dev/null", "new-session", "-d", "-s", "host-fixture", "/bin/sh")
         run("tmux", "-S", str(host_socket), "source-file", str(BINDING))

@@ -115,6 +115,14 @@ See the [implementation review guide](single-attachment-implementation.md) for
 client identification, foreground process groups, lifecycle tests, and remaining
 human acceptance checks.
 
+The Rust connection path separates browser preferences (`BrowseOptions`) from
+typed attachment targets (`SessionTarget`). Preparation returns a command and
+canonical reconnect target as `PreparedAttachment`, without mutating inputs.
+`connect.rs` owns switching policy; `terminal.rs` owns Linux process/TTY mechanics
+and returns typed process outcomes. The TUI returns selections, and shared SSH
+policy lives in `ssh.rs`. This keeps CLI strings and picker protocol out of the
+low-level supervisor and avoids contradictory host/VM mode flags.
+
 ## 4. A managed task environment
 
 Each environment has a stable ID, a display name, a home machine, a project URL,

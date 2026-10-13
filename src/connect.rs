@@ -1,42 +1,34 @@
-//! Origin-side ownership of a single native interactive attachment.
+//! Connection policy: select, prepare, supervise, then interpret the result.
+use crate::sessions::{BrowseOptions, SessionTarget};
+use crate::terminal::{ProcessOutcome, TerminalOwner};
 use crate::{config, sessions, snapshot_request, tui};
-use nix::{
-    sys::{
-        signal::{SigSet, SigmaskHow, Signal, kill, killpg, pthread_sigmask},
-        termios::{self, SetArg, Termios},
-        wait::{Id, WaitPidFlag, WaitStatus, waitid},
-    },
-    unistd::{Pid, getpgrp, tcgetpgrp, tcsetpgrp},
-};
-use signal_hook::{consts::signal::*, iterator::Signals};
-use std::{
-    io::{self, IsTerminal},
-    os::unix::process::CommandExt,
-    process::{Child, Command, ExitCode},
-    thread,
-    time::{Duration, Instant},
-};
+use std::{io::IsTerminal, process::ExitCode};
 
-pub(crate) const PICKER_STATUS: i32 = 78;
+const PICKER_STATUS: i32 = 78;
 
-fn foreground(group: Pid) -> io::Result<()> {
-    // A background/orphaned origin group must block TTOU while reclaiming its
-    // terminal. Catching TTOU alone does not satisfy the kernel's job-control check.
-    let mut blocked = SigSet::empty();
-    blocked.add(Signal::SIGTTOU);
-    let mut old = SigSet::empty();
-    pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&blocked), Some(&mut old))?;
-    let result = tcsetpgrp(io::stdin(), group);
-    pthread_sigmask(SigmaskHow::SIG_SETMASK, Some(&old), None)?;
-    result.map_err(io::Error::from)
+/// Text parsing belongs at CLI entry, not inside the connection loop.
+pub(crate) fn run(target: Option<String>, options: BrowseOptions) -> ExitCode {
+    let target = match target
+        .as_deref()
+        .map(|target| SessionTarget::parse(target, &options))
+        .transpose()
+    {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    run_target(target, options)
 }
 
-pub(crate) fn run(target: Option<String>, mut options: sessions::AttachOptions) -> ExitCode {
-    if let Err(error) = configure(target.as_deref(), &mut options) {
+/// VM commands already know their target and need no text round trip.
+pub(crate) fn run_target(target: Option<SessionTarget>, mut options: BrowseOptions) -> ExitCode {
+    if let Err(error) = configure(target.as_ref(), &mut options) {
         eprintln!("error: {error}");
         return ExitCode::from(2);
     }
-    match run_inner(target, &mut options) {
+    match run_inner(target, &options) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("error: {error}");
@@ -45,19 +37,18 @@ pub(crate) fn run(target: Option<String>, mut options: sessions::AttachOptions) 
     }
 }
 
-fn configure(target: Option<&str>, options: &mut sessions::AttachOptions) -> Result<(), String> {
+fn configure(target: Option<&SessionTarget>, options: &mut BrowseOptions) -> Result<(), String> {
     if let Some(target) = target {
-        options.target = target.to_owned();
-        sessions::validate_managed_target(options)?;
+        target.validate()?;
     }
-    // Pin an implicit inventory path, or use explicit local semantics throughout
-    // the picker and reconnect loop when no inventory exists.
+    // Normalize browser defaults only. A VM target has no host-local flag to
+    // repair, and an explicit host target never inherits picker-only options.
     if options.config_path.is_none() && !options.local && options.socket.is_none() {
         if let Some(path) = config::default_path()
             && config::load_implicit(&path)?.is_some()
         {
             options.config_path = Some(path);
-        } else if options.host.is_none() && !options.target.starts_with("host:") {
+        } else if options.host.is_none() && !target.is_some_and(SessionTarget::requires_inventory) {
             options.local = true;
         } else {
             return Err("--host and host:<host>:<session> require a configured inventory".into());
@@ -74,7 +65,7 @@ fn configure(target: Option<&str>, options: &mut sessions::AttachOptions) -> Res
 }
 
 pub(crate) fn check_origin() -> Result<(), String> {
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err("Argos attachment requires a terminal on stdin and stdout".into());
     }
     for name in [
@@ -93,41 +84,41 @@ pub(crate) fn check_origin() -> Result<(), String> {
     Ok(())
 }
 
-fn run_inner(target: Option<String>, options: &mut sessions::AttachOptions) -> Result<u8, String> {
+fn run_inner(mut next: Option<SessionTarget>, options: &BrowseOptions) -> Result<u8, String> {
     check_origin()?;
-    let request = snapshot_request(
-        options.socket.clone(),
-        options.config_path.clone(),
-        options.host.clone(),
-        options.local,
-    )
-    .map_err(|(message, _)| message)?;
-    for (_, alias, _) in &request.machines {
-        if let Some(alias) = alias {
-            sessions::validate_managed_transport(alias)?;
-        }
-    }
     let mut terminal = TerminalOwner::new().map_err(|e| e.to_string())?;
-    let mut next = target.map(|target| {
-        let mut selected = options.clone();
-        if target.starts_with("vm:") {
-            selected.local = false;
-        }
-        selected
-    });
     let mut previous = None;
     let mut error = None;
     loop {
         if let Some(code) = terminal.poll_idle().map_err(|e| e.to_string())? {
             return Ok(code);
         }
-        let mut selected = match next.take() {
+        let selected = match next.take() {
             Some(selected) => selected,
             None => {
-                match tui::pick_session(options, previous.as_ref(), error.as_deref(), &mut terminal)
-                    .map_err(|e| e.to_string())?
+                let request = snapshot_request(
+                    options.socket.clone(),
+                    options.config_path.clone(),
+                    options.host.clone(),
+                    options.local,
+                )
+                .map_err(|(message, _)| message)?;
+                // Transport policy stays here, never in terminal rendering.
+                for (_, alias, _) in &request.machines {
+                    if let Some(alias) = alias {
+                        crate::ssh::validate_destination(alias)?;
+                    }
+                }
+                match tui::pick_session(
+                    request,
+                    options,
+                    previous.as_ref(),
+                    error.as_deref(),
+                    &mut terminal,
+                )
+                .map_err(|e| e.to_string())?
                 {
-                    tui::PickResult::Select(selected) => selected,
+                    tui::PickResult::Select(target) => target,
                     tui::PickResult::Retry => match previous.clone() {
                         Some(previous) => previous,
                         None => return Ok(0),
@@ -136,232 +127,95 @@ fn run_inner(target: Option<String>, options: &mut sessions::AttachOptions) -> R
                 }
             }
         };
-        let command = match sessions::prepare_managed(&mut selected) {
-            Ok(command) => command,
+        let prepared = match sessions::prepare(&selected, options) {
+            Ok(prepared) => prepared,
             Err(message) => {
                 previous = Some(selected);
                 error = Some(message);
                 continue;
             }
         };
-        let vm_shell = selected.vm_shell;
-        previous = Some(selected);
+        previous = Some(prepared.reconnect_target);
         if let Some(code) = terminal.poll_idle().map_err(|e| e.to_string())? {
             return Ok(code);
         }
-        match terminal.attach(command).map_err(|e| e.to_string())? {
-            AttachmentOutcome::Detached => return Ok(0),
-            AttachmentOutcome::Picker if vm_shell => return Ok(PICKER_STATUS as u8),
-            AttachmentOutcome::Picker => error = None,
-            AttachmentOutcome::Failed(message) => error = Some(message),
-            AttachmentOutcome::Interrupted(code) => return Ok(code),
+        let status = terminal
+            .attach(prepared.command)
+            .map_err(|e| e.to_string())?;
+        match interpret_outcome(&selected, status) {
+            ConnectionOutcome::Exit(code) => return Ok(code),
+            ConnectionOutcome::Picker => error = None,
+            ConnectionOutcome::Recover(message) => error = Some(message),
         }
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum AttachmentOutcome {
-    Detached,
+enum ConnectionOutcome {
+    Exit(u8),
     Picker,
-    Failed(String),
-    Interrupted(u8),
+    Recover(String),
 }
 
-fn outcome(status: WaitStatus) -> AttachmentOutcome {
+fn interpret_outcome(target: &SessionTarget, status: ProcessOutcome) -> ConnectionOutcome {
     match status {
-        WaitStatus::Exited(_, 0) => AttachmentOutcome::Detached,
-        WaitStatus::Exited(_, PICKER_STATUS) => AttachmentOutcome::Picker,
-        WaitStatus::Exited(_, code) => {
-            AttachmentOutcome::Failed(format!("Attachment exited with status {code}."))
+        ProcessOutcome::Exited(0) => ConnectionOutcome::Exit(0),
+        ProcessOutcome::Exited(PICKER_STATUS) if target.uses_tmux() => ConnectionOutcome::Picker,
+        ProcessOutcome::Exited(PICKER_STATUS) => ConnectionOutcome::Exit(PICKER_STATUS as u8),
+        ProcessOutcome::Exited(code) => {
+            ConnectionOutcome::Recover(format!("Attachment exited with status {code}."))
         }
-        WaitStatus::Signaled(_, signal, _) => {
-            AttachmentOutcome::Failed(format!("Attachment terminated by {signal}."))
+        ProcessOutcome::Signaled(signal) => {
+            ConnectionOutcome::Recover(format!("Attachment terminated by {signal}."))
         }
-        _ => unreachable!("only completed children have attachment outcomes"),
-    }
-}
-
-/// Keep the child's process-group leader unreaped until cleanup, preventing PID
-/// reuse while signalling its group. The group contains only this attachment.
-struct OwnedChild(Child);
-
-impl OwnedChild {
-    fn pid(&self) -> Pid {
-        Pid::from_raw(self.0.id() as i32)
-    }
-
-    fn terminate(&self, signal: Signal) {
-        let _ = killpg(self.pid(), signal);
-        let _ = killpg(self.pid(), Signal::SIGCONT);
-        let deadline = Instant::now() + Duration::from_millis(500);
-        while Instant::now() < deadline {
-            if matches!(
-                waitid(
-                    Id::Pid(self.pid()),
-                    WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT
-                ),
-                Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..))
-            ) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
+        ProcessOutcome::SpawnFailed(error) => {
+            ConnectionOutcome::Recover(format!("Cannot start attachment: {error}"))
         }
-    }
-}
-
-impl Drop for OwnedChild {
-    fn drop(&mut self) {
-        let _ = killpg(self.pid(), Signal::SIGKILL);
-        let _ = self.0.wait();
-    }
-}
-
-pub(crate) struct TerminalOwner {
-    original: Termios,
-    group: Pid,
-    signals: Signals,
-}
-
-impl TerminalOwner {
-    fn new() -> io::Result<Self> {
-        let group = getpgrp();
-        if tcgetpgrp(io::stdin())? != group {
-            return Err(io::Error::other(
-                "connect must run in the terminal's foreground process group",
-            ));
-        }
-        Ok(Self {
-            original: termios::tcgetattr(io::stdin())?,
-            group,
-            signals: Signals::new([SIGINT, SIGTERM, SIGHUP, SIGTSTP, SIGCONT, SIGWINCH, SIGTTOU])?,
-        })
-    }
-
-    fn reclaim(&self) -> io::Result<()> {
-        foreground(self.group)?;
-        termios::tcsetattr(io::stdin(), SetArg::TCSANOW, &self.original)?;
-        Ok(())
-    }
-
-    fn suspend(&self) -> io::Result<()> {
-        let current = termios::tcgetattr(io::stdin())?;
-        self.reclaim()?;
-        kill(Pid::this(), Signal::SIGSTOP)?;
-        termios::tcsetattr(io::stdin(), SetArg::TCSANOW, &current)?;
-        Ok(())
-    }
-
-    pub(crate) fn poll_idle(&mut self) -> io::Result<Option<u8>> {
-        for signal in self.signals.pending().collect::<Vec<_>>() {
-            match signal {
-                SIGINT | SIGTERM | SIGHUP => return Ok(Some((128 + signal) as u8)),
-                SIGTSTP => self.suspend()?,
-                _ => {}
-            }
-        }
-        Ok(None)
-    }
-
-    fn attach(&mut self, mut command: Command) -> io::Result<AttachmentOutcome> {
-        // Native clients own foreground terminal I/O and resize while attached.
-        // Argos remains in its original group and only supervises their lifetime.
-        command.process_group(0);
-        let child = match command.spawn() {
-            Ok(child) => OwnedChild(child),
-            Err(error) => {
-                return Ok(AttachmentOutcome::Failed(format!(
-                    "Cannot start attachment: {error}"
-                )));
-            }
-        };
-        let result = (|| {
-            foreground(child.pid())?;
-            // A fast child can attempt a read before tcsetpgrp and receive TTIN.
-            killpg(child.pid(), Signal::SIGCONT)?;
-            loop {
-                for signal in self.signals.pending().collect::<Vec<_>>() {
-                    match signal {
-                        SIGINT | SIGTERM | SIGHUP => {
-                            child.terminate(Signal::try_from(signal).expect("registered signal"));
-                            return Ok(AttachmentOutcome::Interrupted((128 + signal) as u8));
-                        }
-                        SIGWINCH => {
-                            let _ = killpg(child.pid(), Signal::SIGWINCH);
-                        }
-                        SIGTSTP => {
-                            let _ = killpg(child.pid(), Signal::SIGSTOP);
-                        }
-                        _ => {}
-                    }
-                }
-                match waitid(
-                    Id::Pid(child.pid()),
-                    WaitPidFlag::WEXITED
-                        | WaitPidFlag::WSTOPPED
-                        | WaitPidFlag::WNOHANG
-                        | WaitPidFlag::WNOWAIT,
-                )? {
-                    status @ (WaitStatus::Exited(..) | WaitStatus::Signaled(..)) => {
-                        return Ok(outcome(status));
-                    }
-                    WaitStatus::Stopped(_, Signal::SIGTTIN | Signal::SIGTTOU) => {
-                        foreground(child.pid())?;
-                        killpg(child.pid(), Signal::SIGCONT)?;
-                    }
-                    WaitStatus::Stopped(..) => {
-                        self.suspend()?;
-                        foreground(child.pid())?;
-                        killpg(child.pid(), Signal::SIGCONT)?;
-                    }
-                    _ => {}
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
-        })();
-        drop(child); // terminate owned descendants and reap before any picker
-        self.reclaim()?;
-        // Native clients normally reset these themselves. Also repair modes
-        // after a crash or forced cleanup, when they cannot run their handlers.
-        crossterm::execute!(
-            io::stdout(),
-            crossterm::event::DisableMouseCapture,
-            crossterm::event::DisableBracketedPaste,
-            crossterm::terminal::LeaveAlternateScreen,
-            crossterm::cursor::Show
-        )?;
-        result
-    }
-}
-
-impl Drop for TerminalOwner {
-    fn drop(&mut self) {
-        let _ = self.reclaim();
+        ProcessOutcome::Interrupted(code) => ConnectionOutcome::Exit(code),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sessions::GuestMode;
+    use nix::sys::signal::Signal;
+
     #[test]
-    fn distinguishes_handoff_detach_failure_and_signal() {
-        let pid = Pid::from_raw(123);
+    fn picker_status_is_tmux_protocol_not_shell_exit() {
+        let tmux = SessionTarget::Vm {
+            id: "test".into(),
+            mode: GuestMode::Tmux,
+        };
+        let shell = SessionTarget::Vm {
+            id: "test".into(),
+            mode: GuestMode::Shell,
+        };
         assert_eq!(
-            outcome(WaitStatus::Exited(pid, 0)),
-            AttachmentOutcome::Detached
+            interpret_outcome(&tmux, ProcessOutcome::Exited(78)),
+            ConnectionOutcome::Picker
         );
         assert_eq!(
-            outcome(WaitStatus::Exited(pid, 78)),
-            AttachmentOutcome::Picker
+            interpret_outcome(&shell, ProcessOutcome::Exited(78)),
+            ConnectionOutcome::Exit(78)
+        );
+        assert_eq!(
+            interpret_outcome(&tmux, ProcessOutcome::Exited(0)),
+            ConnectionOutcome::Exit(0)
+        );
+        assert_eq!(
+            interpret_outcome(&tmux, ProcessOutcome::Interrupted(143)),
+            ConnectionOutcome::Exit(143)
         );
         for code in [1, 2, 77, 79, 255] {
             assert!(matches!(
-                outcome(WaitStatus::Exited(pid, code)),
-                AttachmentOutcome::Failed(_)
+                interpret_outcome(&tmux, ProcessOutcome::Exited(code)),
+                ConnectionOutcome::Recover(_)
             ));
         }
         assert!(matches!(
-            outcome(WaitStatus::Signaled(pid, Signal::SIGTERM, false)),
-            AttachmentOutcome::Failed(_)
+            interpret_outcome(&tmux, ProcessOutcome::Signaled(Signal::SIGTERM)),
+            ConnectionOutcome::Recover(_)
         ));
     }
 }

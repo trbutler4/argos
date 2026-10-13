@@ -1,4 +1,4 @@
-use crate::{config, tmux::process};
+use crate::{config, process};
 use serde::{Deserialize, Serialize};
 use std::{
     env,

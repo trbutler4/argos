@@ -30,6 +30,7 @@ class Terminal:
         self.master, self.slave = pty.openpty()
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 36, 150, 0, 0))
         self.original = termios.tcgetattr(self.slave)
+        self.original_flags = fcntl.fcntl(self.slave, fcntl.F_GETFL)
         self.output = b""
         self.process = subprocess.Popen(
             args, stdin=self.slave, stdout=self.slave, stderr=self.slave, env=env,
@@ -105,8 +106,9 @@ def main():
 
         def exited(term, code=0):
             wait(lambda: term.process.poll() is not None, "process did not exit")
-            assert term.process.returncode == code, term.output
+            assert term.process.returncode == code, (code, term.process.returncode, term.output)
             assert termios.tcgetattr(term.slave) == term.original, "terminal not restored"
+            assert fcntl.fcntl(term.slave, fcntl.F_GETFL) == term.original_flags, "terminal descriptor flags not restored"
 
         keys = [root / "server_key", root / "client_key"]
         for key in keys:
