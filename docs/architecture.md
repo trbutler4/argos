@@ -302,9 +302,11 @@ sync, multi-user tenancy, Kubernetes, cloud provisioning, public service ingress
 Windows/macOS support, cross-architecture emulation, universal IDE integration,
 agent transcript scraping, or a new LLM provider abstraction in v1.
 
-Nix flake/dev tooling and a small NixOS/Home Manager module are legitimate parts of
-making this work on the user's own machines. Installer matrices, release automation,
-public packaging and a generic provider/plugin framework are not.
+Nix flake/dev tooling and a small NixOS/Home Manager module support the personal
+workflow. At the user's request, scope now includes explicit versioning and one
+tested static x86-64 Linux binary release, alongside tagged Nix packages. Broad
+installer/platform matrices and a generic provider/plugin framework remain out
+of scope. See [versioning](versioning.md) for the release contract.
 
 ## Sources checked while scoping (2026-09-15)
 

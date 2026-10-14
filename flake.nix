@@ -12,6 +12,15 @@
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
       microvmSystem = "x86_64-linux";
       cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+      installCompletions = command: ''
+        # Dynamic completion must execute on the first zsh fpath autoload too.
+        COMPLETE=zsh ${command} > argos.zsh
+        echo '_clap_dynamic_completer_argos "$@"' >> argos.zsh
+        installShellCompletion --cmd argos \
+          --zsh argos.zsh \
+          --bash <(COMPLETE=bash ${command}) \
+          --fish <(COMPLETE=fish ${command})
+      '';
     in {
       packages = nixpkgs.lib.genAttrs systems (system:
         let pkgs = import nixpkgs { inherit system; };
@@ -27,22 +36,7 @@
               wrapProgram $out/bin/argos \
                 --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.tmux pkgs.openssh pkgs.git ]}
             '' + pkgs.lib.optionalString
-              (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) ''
-              # Dynamic completion: the emitted script re-invokes the wrapper on
-              # each Tab, so it must be generated after wrapProgram.
-              #
-              # clap emits a script intended for `eval` in an rc file, whose body
-              # only defines the completer and calls compdef. When installed into
-              # fpath instead, zsh autoloads it on the first Tab and the body must
-              # itself perform the completion, so append an invocation. Without
-              # this the first Tab for a given shell silently does nothing.
-              COMPLETE=zsh $out/bin/argos > argos.zsh
-              echo '_clap_dynamic_completer_argos "$@"' >> argos.zsh
-              installShellCompletion --cmd argos \
-                --zsh argos.zsh \
-                --bash <(COMPLETE=bash $out/bin/argos) \
-                --fish <(COMPLETE=fish $out/bin/argos)
-            '';
+              (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) (installCompletions "$out/bin/argos");
             meta = {
               description = "Personal command center for tmux work";
               mainProgram = "argos";
@@ -52,6 +46,24 @@
           default = argos;
         } // nixpkgs.lib.optionalAttrs (system == microvmSystem) {
           argos-microvm-prototype = self.nixosConfigurations.argos-microvm-prototype.config.microvm.declaredRunner;
+          # Downloadable artifact: a real static musl ELF, without a Nix wrapper
+          # or store-path interpreter. SSH/tmux remain runtime tools on PATH.
+          argos-release = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
+            pname = "argos";
+            version = cargoToml.package.version;
+            src = pkgs.lib.cleanSource ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+            nativeBuildInputs = [ pkgs.installShellFiles ];
+            postInstall = ''
+              install -Dm644 examples/connect.tmux.conf $out/share/argos/connect.tmux.conf
+              export PATH="$out/bin:$PATH"
+            '' + installCompletions "argos";
+            meta = {
+              description = "Standalone Argos binary for x86-64 Linux";
+              mainProgram = "argos";
+              platforms = [ "x86_64-linux" ];
+            };
+          };
         });
 
       apps = nixpkgs.lib.genAttrs systems (system: {
@@ -74,6 +86,8 @@
               tmux
               openssh
               python3
+              zsh
+              actionlint
               git
             ];
           };

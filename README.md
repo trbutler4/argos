@@ -375,11 +375,26 @@ Tab press, and remote session names are not enumerated.
 `Cargo.toml` is the source of truth for the Argos version. The Nix package reads
 that version directly, so bumping `package.version` is the release version bump.
 
-Every push to `main` runs the release workflow. If tag `v<version>` does not
-exist, GitHub Actions validates the Rust project, builds the Nix package, creates
-an annotated tag, and publishes a GitHub release with an x86_64 Linux tarball and
-SHA-256 file. If the tag already exists, the workflow exits successfully without
-creating another release.
+Use stable `MAJOR.MINOR.PATCH` versions. Before 1.0, new features and breaking
+workflow changes bump MINOR; compatible fixes bump PATCH. Collect changes under
+Unreleased in [CHANGELOG.md](CHANGELOG.md), then prepare a release explicitly:
+
+```sh
+python3 scripts/release.py bump 0.2.1
+python3 scripts/release.py check --base-ref origin/main
+```
+
+The helper updates the manifest, root lockfile version, and changelog together.
+CI validates every PR/main push and tests a standalone **static x86-64 Linux
+binary**, including real SSH/tmux/PTY checks. A successful version bump on `main`
+creates an immutable annotated tag and publishes a tarball plus SHA-256 checksum.
+Existing versions still get validation, but their published assets are not replaced.
+
+Downloads contain `bin/argos`, shell completions, the optional tmux binding, and
+installation notes. The binary runs without Nix; session commands need SSH/tmux
+on PATH and VM lifecycle still needs Nix/KVM. See
+[binary installation](docs/binary-release.md) and the
+[versioning/recovery guide](docs/versioning.md).
 
 ## Development checks
 
@@ -389,6 +404,7 @@ nix develop --command bash -c '
   cargo test --locked &&
   cargo clippy --locked --all-targets -- -D warnings &&
   cargo build --locked &&
+  python3 tests/release.py &&
   python3 tests/local_tmux.py &&
   python3 tests/config_cli.py &&
   python3 tests/host_status.py &&

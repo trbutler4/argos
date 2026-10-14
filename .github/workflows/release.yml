@@ -1,110 +1,135 @@
-name: Release
+name: Validate and release
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  release:
-    name: Release Cargo version
+  validate:
+    name: Validate and build standalone binary
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check release metadata
+        id: version
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 scripts/release.py check --base-ref "$BASE_REF"
+
+      - uses: DeterminateSystems/nix-installer-action@v23
+
+      - name: Validate CLI and integration behavior
+        run: |
+          nix develop --command bash -c '
+            actionlint &&
+            cargo fmt --check &&
+            cargo test --locked &&
+            cargo clippy --locked --all-targets -- -D warnings &&
+            cargo build --locked &&
+            python3 tests/release.py &&
+            python3 tests/host_status.py &&
+            python3 tests/vm_list.py &&
+            python3 tests/local_tmux.py &&
+            python3 tests/config_cli.py &&
+            python3 tests/remote_ssh.py &&
+            python3 tests/attach_tmux.py &&
+            python3 tests/remote_attach.py &&
+            python3 tests/connect.py &&
+            python3 tests/tui.py &&
+            python3 tests/completions.py
+          '
+
+      - name: Build and verify release archive
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          nix build .#argos-release --out-link result-release
+          nix develop --command python3 scripts/package_release.py --package result-release
+          nix develop --command python3 tests/release_artifact.py "dist/argos-${TAG}-x86_64-linux.tar.gz" --integration
+          python3 scripts/release.py notes > dist/release-notes.md
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 7
+
+  publish:
+    name: Publish Cargo version
+    needs: validate
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v17
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: dist
 
-      - name: Read version
-        id: version
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$(${PYTHON:-python3} - <<'PY'
-          import tomllib
-          with open('Cargo.toml', 'rb') as f:
-              print(tomllib.load(f)['package']['version'])
-          PY
-          )"
-          tag="v${version}"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          git fetch --tags --force
-          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Tag ${tag} already exists. Skipping release."
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Validate
-        if: steps.version.outputs.skip != 'true'
-        run: |
-          nix develop --command bash -lc '
-            cargo fmt -- --check &&
-            cargo clippy --locked -- -D warnings &&
-            cargo test --locked -- --nocapture
-          '
-
-      - name: Build release binary
-        if: steps.version.outputs.skip != 'true'
-        run: |
-          set -euo pipefail
-          nix build .#packages.x86_64-linux.default
-          mkdir -p dist
-          cp result/bin/argos "dist/argos-${{ steps.version.outputs.tag }}-x86_64-linux"
-          tar -C dist -czf "dist/argos-${{ steps.version.outputs.tag }}-x86_64-linux.tar.gz" "argos-${{ steps.version.outputs.tag }}-x86_64-linux"
-          sha256sum "dist/argos-${{ steps.version.outputs.tag }}-x86_64-linux.tar.gz" > "dist/argos-${{ steps.version.outputs.tag }}-x86_64-linux.tar.gz.sha256"
-
-      - name: Write release notes
-        if: steps.version.outputs.skip != 'true'
-        run: |
-          set -euo pipefail
-          tag="${{ steps.version.outputs.tag }}"
-          previous_tag="$(git tag --sort=-v:refname | grep '^v[0-9]' | grep -v "^${tag}$" | head -n 1 || true)"
-          {
-            echo "## Argos ${tag}"
-            echo
-            if [ -n "$previous_tag" ]; then
-              echo "Changes since ${previous_tag}:"
-              git log --pretty='- %s (%h)' "${previous_tag}..HEAD"
-            else
-              echo "Changes:"
-              git log --pretty='- %s (%h)' HEAD
-            fi
-            echo
-            echo "Artifact: \`argos-${tag}-x86_64-linux.tar.gz\`"
-          } > release-notes.md
-
-      - name: Tag release
-        if: steps.version.outputs.skip != 'true'
-        run: |
-          set -euo pipefail
-          tag="${{ steps.version.outputs.tag }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$tag" -m "Argos $tag"
-          git push origin "$tag"
-
-      - name: Create GitHub release
-        if: steps.version.outputs.skip != 'true'
+      - name: Publish immutable release or resume its draft
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: |
-          tag="${{ steps.version.outputs.tag }}"
-          gh release create "$tag" \
-            "dist/argos-${tag}-x86_64-linux.tar.gz" \
-            "dist/argos-${tag}-x86_64-linux.tar.gz.sha256" \
-            --title "Argos ${tag}" \
-            --notes-file release-notes.md
+          set -euo pipefail
+          archive="argos-${TAG}-x86_64-linux.tar.gz"
+          (cd dist && sha256sum --check "${archive}.sha256")
+
+          draft=""
+          if draft="$(gh release view "$TAG" --json isDraft --jq .isDraft)"; then
+            if [ "$draft" = false ]; then
+              git rev-parse --verify "refs/tags/${TAG}^{commit}" >/dev/null
+              echo "${TAG} is already published. Validation passed; no assets or tags were changed."
+              exit 0
+            fi
+          fi
+
+          if git rev-parse --verify "refs/tags/${TAG}^{commit}" >/dev/null 2>&1; then
+            if [ "$(git cat-file -t "refs/tags/${TAG}")" != tag ]; then
+              echo "${TAG} must be an annotated release tag; it will not be replaced." >&2
+              exit 1
+            fi
+            if [ "$(git rev-parse "refs/tags/${TAG}^{commit}")" != "$(git rev-parse HEAD)" ]; then
+              echo "${TAG} belongs to another commit. Rerun its original workflow to recover the release." >&2
+              exit 1
+            fi
+          else
+            git tag -a "$TAG" -m "Argos ${TAG}"
+            git push origin "refs/tags/${TAG}"
+          fi
+
+          if [ "$draft" != true ]; then
+            gh release create "$TAG" --verify-tag --draft \
+              --title "Argos ${TAG}" --notes-file dist/release-notes.md
+          fi
+          # A failed upload leaves a draft. Retrying the same commit is safe;
+          # published releases are never overwritten by this workflow.
+          gh release upload "$TAG" "dist/${archive}" "dist/${archive}.sha256" --clobber
+          gh release edit "$TAG" --draft=false --latest --notes-file dist/release-notes.md

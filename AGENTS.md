@@ -29,6 +29,12 @@ is active inventory schema, while `examples/environment-proposal.toml` is a
 future proposal. Do not mark implementation milestones complete from
 documentation checks.
 
+Application version is authoritative in Cargo.toml and mirrored by Cargo.lock.
+Record source/build changes in CHANGELOG.md; use `scripts/release.py bump` when
+preparing a release. `.#argos-release` is the unwrapped static Linux artifact;
+the default Nix package remains wrapped. Publication happens only on main after
+validation, and existing tags/published assets are immutable.
+
 ## Keep the design focused
 
 - Reuse SSH, tmux, NixOS/systemd and repo-native tools. Do not replace their core functions.
@@ -68,6 +74,10 @@ documentation checks.
   `python3 tests/connect.py`, `python3 tests/tui.py`, and `python3 tests/completions.py`.
   With explicit permission to boot a disposable local VM, also run
   `python3 tests/vm_connect.py` for real guest attachment/switching acceptance.
+  Release changes additionally require `actionlint`, `python3 tests/release.py`,
+  `python3 scripts/release.py check`, `nix build .#argos-release`, packaging via
+  `scripts/package_release.py`, and `tests/release_artifact.py --integration`
+  against the generated archive.
 
 ## Public repository boundary
 
