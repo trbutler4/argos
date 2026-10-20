@@ -74,6 +74,7 @@ def main():
             f"HostKey {server_key}\nAuthorizedKeysFile {authorized}\nUsePAM no\nStrictModes no\n"
             f"PasswordAuthentication no\nAuthenticationMethods publickey\nListenAddress 127.0.0.1\nPort {port}\n"
             "LogLevel ERROR\nPidFile none\nPermitTTY yes\n"
+            f"SetEnv {json.dumps('PATH=' + os.environ['PATH'])}\n"
         )
         remote_socket = root / "remote tmux.sock"
         config = root / "config.toml"
@@ -104,7 +105,7 @@ def main():
                 if check():
                     return
                 time.sleep(0.05)
-            raise AssertionError(description)
+            raise AssertionError((description, [(process.poll(), outputs.get(process.pid, b"")[-3000:]) for process, *_ in clients]))
 
         def drain():
             for process, master, slave, _ in clients:
@@ -140,6 +141,9 @@ def main():
                 time.sleep(0.1)
             else:
                 raise AssertionError("sshd did not become reachable")
+
+            remote_version = run(str(actual_ssh), "-F", str(ssh_config), "test-peer", "tmux -V", env=env)
+            assert remote_version.returncode == 0 and remote_version.stdout == run("tmux", "-V", env=env).stdout, remote_version.stderr
 
             target_name = "remote α ' ; $(literal) | trailing "
             target_id = tmux(remote_tmux, "new-session", "-d", "-P", "-F", "#{session_id}", "-s", target_name, "/bin/sh")

@@ -159,6 +159,7 @@ exec {shlex.quote(actual_ssh)} -F {shlex.quote(str(ssh_config))} "$@"
             f"HostKey {keys[0]}\nAuthorizedKeysFile {authorized}\nUsePAM no\nStrictModes no\n"
             f"PasswordAuthentication no\nAuthenticationMethods publickey\nListenAddress 127.0.0.1\nPort {port}\n"
             "LogLevel ERROR\nPidFile none\nPermitTTY yes\nPerSourcePenalties no\n"
+            f"SetEnv {json.dumps('PATH=' + os.environ['PATH'])}\n"
         )
         sshd = subprocess.Popen([shutil.which("sshd"), "-D", "-e", "-f", str(sshd_config)],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -208,6 +209,7 @@ exec {shlex.quote(actual_ssh)} -F {shlex.quote(str(ssh_config))} "$@"
         try:
             wait(lambda: run("ssh", "-o", "ControlPath=none", "peer-a", "true", check=False).returncode == 0,
                  "sshd not reachable")
+            assert run("ssh", "-o", "ControlPath=none", "peer-a", "tmux -V").stdout == run("tmux", "-V").stdout
             ids = {}
             for host in sockets:
                 # -N attach/list must not create servers, but this explicit test
