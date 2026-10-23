@@ -3,7 +3,7 @@ mod guest;
 mod state;
 pub(crate) use guest::prepare_guest_command;
 use serde::{Deserialize, Serialize};
-pub(crate) use state::{VmPortMapping, VmRecord, VmSnapshot, valid_id};
+pub(crate) use state::{VmPortMapping, VmRecord, VmResources, VmSnapshot, valid_id};
 use state::{load_record, load_snapshot, load_vms, state_root, validate_record, write_record};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -661,6 +661,7 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
         created_at_unix_ms: Some(now),
         updated_at_unix_ms: Some(now),
         started_at_unix_ms: None,
+        resources: VmResources::default(),
     };
     validate_record(&record, &state_file)?;
     Ok(VmCreateOutput {

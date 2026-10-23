@@ -8,6 +8,52 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) const DEFAULT_CPUS: u32 = 4;
+pub(crate) const DEFAULT_MEMORY_MIB: u64 = 4096;
+pub(crate) const DEFAULT_VAR_DISK_MIB: u64 = 1024;
+pub(crate) const DEFAULT_STORE_DISK_MIB: u64 = 8192;
+
+const MAX_CPUS: u32 = 256;
+const MAX_MEMORY_MIB: u64 = 1_048_576;
+const MAX_DISK_MIB: u64 = 4_194_304;
+
+fn default_cpus() -> u32 {
+    DEFAULT_CPUS
+}
+fn default_memory_mib() -> u64 {
+    DEFAULT_MEMORY_MIB
+}
+fn default_var_disk_mib() -> u64 {
+    DEFAULT_VAR_DISK_MIB
+}
+fn default_store_disk_mib() -> u64 {
+    DEFAULT_STORE_DISK_MIB
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct VmResources {
+    #[serde(default = "default_cpus")]
+    pub(crate) cpus: u32,
+    #[serde(default = "default_memory_mib")]
+    pub(crate) memory_mib: u64,
+    #[serde(default = "default_var_disk_mib")]
+    pub(crate) var_disk_mib: u64,
+    #[serde(default = "default_store_disk_mib")]
+    pub(crate) store_disk_mib: u64,
+}
+
+impl Default for VmResources {
+    fn default() -> Self {
+        Self {
+            cpus: DEFAULT_CPUS,
+            memory_mib: DEFAULT_MEMORY_MIB,
+            var_disk_mib: DEFAULT_VAR_DISK_MIB,
+            store_disk_mib: DEFAULT_STORE_DISK_MIB,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct VmSnapshot {
     pub(crate) schema_version: u32,
@@ -66,6 +112,8 @@ pub(crate) struct VmRecord {
     pub(crate) updated_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub(crate) started_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub(crate) resources: VmResources,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -193,6 +241,7 @@ pub(super) fn validate_record(record: &VmRecord, path: &Path) -> Result<(), VmEr
     if !valid_id(&record.id) {
         return Err(invalid(path, "invalid id"));
     }
+    validate_resources(&record.resources, path)?;
     if let Some(workdir) = &record.guest_workdir
         && (!workdir.starts_with('/') || workdir.chars().any(|c| c == '\0' || c.is_control()))
     {
@@ -220,6 +269,27 @@ pub(super) fn validate_record(record: &VmRecord, path: &Path) -> Result<(), VmEr
     Ok(())
 }
 
+pub(crate) fn validate_resources(resources: &VmResources, path: &Path) -> Result<(), VmError> {
+    if resources.cpus == 0 || resources.cpus > MAX_CPUS {
+        return Err(invalid(path, "cpus must be between 1 and 256"));
+    }
+    if resources.memory_mib == 0 || resources.memory_mib > MAX_MEMORY_MIB {
+        return Err(invalid(path, "memory_mib must be between 1 and 1048576"));
+    }
+    for (name, value) in [
+        ("var_disk_mib", resources.var_disk_mib),
+        ("store_disk_mib", resources.store_disk_mib),
+    ] {
+        if value == 0 || value > MAX_DISK_MIB {
+            return Err(invalid(
+                path,
+                &format!("{name} must be between 1 and 4194304"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn invalid(path: &Path, reason: &str) -> VmError {
     VmError {
         code: "invalid_state",
@@ -233,4 +303,43 @@ pub(crate) fn valid_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resources_default_for_legacy_state() {
+        let record: VmRecord = serde_json::from_str(
+            r#"{"schema_version":1,"id":"demo","name":"Demo","status":"created","host":"local"}"#,
+        )
+        .unwrap();
+        assert_eq!(record.resources, VmResources::default());
+    }
+
+    #[test]
+    fn resources_reject_zero_and_large_values() {
+        let path = Path::new("state.json");
+        for resources in [
+            VmResources {
+                cpus: 0,
+                ..Default::default()
+            },
+            VmResources {
+                memory_mib: 0,
+                ..Default::default()
+            },
+            VmResources {
+                var_disk_mib: 0,
+                ..Default::default()
+            },
+            VmResources {
+                store_disk_mib: MAX_DISK_MIB + 1,
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_resources(&resources, path).is_err());
+        }
+    }
 }

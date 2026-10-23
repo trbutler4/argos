@@ -645,6 +645,7 @@ mod tests {
                 created_at_unix_ms: None,
                 updated_at_unix_ms: None,
                 started_at_unix_ms: None,
+                resources: vm::VmResources::default(),
             }],
         }
     }
