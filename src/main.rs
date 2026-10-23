@@ -182,6 +182,18 @@ enum HostsCommand {
 
 #[derive(Subcommand, Debug)]
 enum VmCommand {
+    /// Fetch and SHA-256 verify a file from a running VM without changing guest state.
+    Fetch {
+        #[arg(add = ArgValueCandidates::new(completions::vm_ids))]
+        id: String,
+        guest_path: String,
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
+        output: std::path::PathBuf,
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
+        state_dir: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// List VM records in this host's Argos state directory.
     List {
         #[arg(long)]
@@ -474,6 +486,19 @@ fn main() -> ExitCode {
             } => host::hosts_status(json, config, host_filter),
         },
         Command::Vm { command } => match command {
+            VmCommand::Fetch {
+                id,
+                guest_path,
+                output,
+                state_dir,
+                json,
+            } => vm::artifact::fetch(vm::artifact::FetchOptions {
+                id,
+                guest_path,
+                output,
+                state_dir,
+                json,
+            }),
             VmCommand::List {
                 json,
                 detailed,

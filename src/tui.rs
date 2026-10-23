@@ -629,6 +629,7 @@ mod tests {
                 profile_path: None,
                 guest_workdir: None,
                 packages: Vec::new(),
+                guest_modules: Vec::new(),
                 ports: Vec::new(),
                 repo_path: None,
                 workdir: None,

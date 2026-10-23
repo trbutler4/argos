@@ -1,5 +1,7 @@
 use crate::{config, host};
+pub(crate) mod artifact;
 mod guest;
+mod source;
 mod state;
 pub(crate) use guest::prepare_guest_command;
 use serde::{Deserialize, Serialize};
@@ -52,6 +54,10 @@ impl Default for ProfileWorkspace {
 struct ProfileVm {
     #[serde(default)]
     packages: Vec<String>,
+    #[serde(default)]
+    resources: VmResources,
+    #[serde(default)]
+    modules: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -633,6 +639,7 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
     let guest_workdir = profile.profile.workspace.workdir.clone();
     let packages = packages_with_defaults(&profile.profile, &vm_defaults);
     let ports = allocate_port_mappings(&profile.profile, &state_root)?;
+    let guest_modules = resolved_profile_modules(&profile)?;
     let ssh_port = ssh_port_for_id(&id);
     let record = VmRecord {
         schema_version: 1,
@@ -645,6 +652,7 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
         profile_path: profile.path.map(|path| path.display().to_string()),
         guest_workdir: Some(guest_workdir),
         packages,
+        guest_modules,
         ports,
         repo_path: repo_path.as_ref().map(|path| path.display().to_string()),
         workdir: Some(workdir.display().to_string()),
@@ -661,7 +669,7 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
         created_at_unix_ms: Some(now),
         updated_at_unix_ms: Some(now),
         started_at_unix_ms: None,
-        resources: VmResources::default(),
+        resources: profile.profile.vm.resources.clone(),
     };
     validate_record(&record, &state_file)?;
     Ok(VmCreateOutput {
@@ -713,6 +721,11 @@ fn update_vm(options: UpdateOptions) -> Result<VmUpdateOutput, VmError> {
         record.repo_path.as_deref(),
         record.profile_path.as_deref(),
     )?;
+    if loaded_profile.path.is_none() && !record.guest_modules.is_empty() {
+        return Err(state_error(
+            "recorded guest module profile is unavailable; provide an explicit --profile to update or remove modules",
+        ));
+    }
     let profile_source = loaded_profile
         .path
         .as_ref()
@@ -724,6 +737,9 @@ fn update_vm(options: UpdateOptions) -> Result<VmUpdateOutput, VmError> {
         .map(|path| path.display().to_string());
     record.guest_workdir = Some(loaded_profile.profile.workspace.workdir.clone());
     record.packages = packages_with_defaults(&loaded_profile.profile, &vm_defaults);
+    record.guest_modules = resolved_profile_modules(&loaded_profile)?;
+    record.resources = loaded_profile.profile.vm.resources.clone();
+    guard_disk_changes(&previous_record, &record, &state_root)?;
     record.ports =
         allocate_update_port_mappings(&loaded_profile.profile, &state_root, &previous_record)?;
     record.updated_at_unix_ms = Some(now_ms());
@@ -752,6 +768,7 @@ fn update_vm(options: UpdateOptions) -> Result<VmUpdateOutput, VmError> {
             .as_ref()
             .map(PathBuf::from)
             .unwrap_or_else(|| instance_dir.join("flake.nix"));
+        source::snapshot_modules(&instance_dir, &record.guest_modules)?;
         write_guest_tmux_config(&instance_dir, tmux_config.as_deref())?;
         fs::write(
             &microvm_config,
@@ -763,7 +780,7 @@ fn update_vm(options: UpdateOptions) -> Result<VmUpdateOutput, VmError> {
                 microvm_config.display()
             ))
         })?;
-        fs::write(&flake_path, render_instance_flake()).map_err(|error| {
+        fs::write(&flake_path, render_instance_flake(&record)).map_err(|error| {
             state_error(format!(
                 "cannot write microVM flake {}: {error}",
                 flake_path.display()
@@ -882,6 +899,7 @@ fn create_vm_state(output: &mut VmCreateOutput, tmux_config: Option<&str>) -> Re
         }
     }
     apply_default_cloned_profile(output)?;
+    source::snapshot_modules(&instance_dir, &output.record.guest_modules)?;
     write_guest_tmux_config(&instance_dir, tmux_config)?;
     fs::write(
         &output.microvm_config,
@@ -899,7 +917,7 @@ fn create_vm_state(output: &mut VmCreateOutput, tmux_config: Option<&str>) -> Re
         .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| instance_dir.join("flake.nix"));
-    fs::write(&flake_path, render_instance_flake()).map_err(|error| {
+    fs::write(&flake_path, render_instance_flake(&output.record)).map_err(|error| {
         state_error(format!(
             "cannot write microVM flake {}: {error}",
             flake_path.display()
@@ -1041,6 +1059,7 @@ fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
         };
         return Ok(output);
     }
+    warn_capacity(&record, &state_root);
     if tmux_session_exists(&console_session) {
         kill_tmux_session(&console_session);
     }
@@ -1066,7 +1085,7 @@ fn start_vm(options: StartOptions) -> Result<VmStartOutput, VmError> {
         ))
     })?;
     if !flake_path.exists() {
-        fs::write(&flake_path, render_instance_flake()).map_err(|error| {
+        fs::write(&flake_path, render_instance_flake(&record)).map_err(|error| {
             state_error(format!(
                 "cannot write microVM flake {}: {error}",
                 flake_path.display()
@@ -1456,6 +1475,7 @@ fn read_repo_profile(path: &Path) -> Result<RepoProfile, VmError> {
 }
 
 fn validate_profile(profile: &RepoProfile, path: &Path) -> Result<(), VmError> {
+    state::validate_resources(&profile.vm.resources, path)?;
     if !profile.workspace.workdir.starts_with('/')
         || profile.workspace.workdir.contains('\0')
         || profile.workspace.workdir.chars().any(char::is_control)
@@ -1618,20 +1638,120 @@ fn apply_default_cloned_profile(output: &mut VmCreateOutput) -> Result<(), VmErr
     output.record.profile_path = Some(profile_path.display().to_string());
     output.record.guest_workdir = Some(profile.workspace.workdir.clone());
     output.record.packages = profile.vm.packages.clone();
+    output.record.resources = profile.vm.resources.clone();
+    output.record.guest_modules = source::resolve_modules(&profile_path, &profile.vm.modules)?;
+    state::validate_resources(&output.record.resources, &profile_path)?;
     output.record.ports = allocate_port_mappings(&profile, &state_root)?;
     Ok(())
 }
 
+fn resolved_profile_modules(profile: &LoadedProfile) -> Result<Vec<String>, VmError> {
+    match profile.path.as_deref() {
+        Some(path) => source::resolve_modules(path, &profile.profile.vm.modules),
+        None => Ok(Vec::new()),
+    }
+}
+
+// Never resize or truncate an existing filesystem image. An exact raw-size
+// match permits adopting an allocation previously supplied by a guest module.
+fn guard_disk_changes(previous: &VmRecord, next: &VmRecord, root: &Path) -> Result<(), VmError> {
+    let instance = previous
+        .instance_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("instances").join(&previous.id));
+    for (name, old, new) in [
+        (
+            "var.img",
+            previous.resources.var_disk_mib,
+            next.resources.var_disk_mib,
+        ),
+        (
+            "nix-store-overlay.img",
+            previous.resources.store_disk_mib,
+            next.resources.store_disk_mib,
+        ),
+    ] {
+        if old == new {
+            continue;
+        }
+        let path = instance.join(name);
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Ok(metadata) if metadata.is_file() && metadata.len() == new * 1024 * 1024 => (),
+            Ok(_) => {
+                return Err(state_error(format!(
+                    "cannot change disk allocation for {} with an existing image; Argos does not resize disks",
+                    path.display()
+                )));
+            }
+            Err(error) => {
+                return Err(state_error(format!(
+                    "cannot inspect disk {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn capacity_warnings(record: &VmRecord, others: &[VmRecord], meminfo: &str) -> Vec<String> {
+    let memory = |field: &str| {
+        meminfo.lines().find_map(|line| {
+            let value = line
+                .strip_prefix(field)?
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()?;
+            Some(value / 1024)
+        })
+    };
+    let mut warnings = Vec::new();
+    if let Some(available) = memory("MemAvailable:")
+        && record.resources.memory_mib > available
+    {
+        warnings.push(format!(
+            "requested {} MiB RAM exceeds currently available {available} MiB",
+            record.resources.memory_mib
+        ));
+    }
+    let allocated = others
+        .iter()
+        .filter(|other| other.id != record.id && other.status == "running")
+        .fold(record.resources.memory_mib, |sum, other| {
+            sum.saturating_add(other.resources.memory_mib)
+        });
+    if let Some(total) = memory("MemTotal:")
+        && allocated > total
+    {
+        warnings.push(format!("recorded running VM allocations plus this VM total {allocated} MiB, exceeding host RAM {total} MiB"));
+    }
+    warnings
+}
+
+fn warn_capacity(record: &VmRecord, root: &Path) {
+    let Ok(meminfo) = fs::read_to_string("/proc/meminfo") else {
+        return;
+    };
+    let others = load_vms(&root.join("vms")).unwrap_or_default();
+    for warning in capacity_warnings(record, &others, &meminfo) {
+        eprintln!("warning: {warning} (advisory estimate, not a reservation)");
+    }
+}
+
 fn build_runner(instance_dir: &Path) -> Result<PathBuf, VmError> {
     let out_link = instance_dir.join("runner");
+    let source = source::BuildSource::new(instance_dir)?;
     let status = Command::new("nix")
         .args([
             "build",
-            ".#runner",
+            "path:.#runner",
             "--out-link",
             out_link.to_str().unwrap_or_default(),
         ])
-        .current_dir(instance_dir)
+        .current_dir(source.path())
         .status()
         .map_err(|error| VmError {
             code: "nix_error",
@@ -1643,6 +1763,7 @@ fn build_runner(instance_dir: &Path) -> Result<PathBuf, VmError> {
             message: format!("nix build failed with status {status}"),
         });
     }
+    source.publish_lock()?;
     Ok(out_link)
 }
 
@@ -1812,10 +1933,10 @@ fn invalid_args(message: &str) -> VmError {
     }
 }
 
-fn state_error(message: String) -> VmError {
+fn state_error(message: impl Into<String>) -> VmError {
     VmError {
         code: "state_error",
-        message,
+        message: message.into(),
     }
 }
 
@@ -2070,6 +2191,13 @@ fn print_update(output: &VmUpdateOutput) {
 }
 
 fn print_record_profile(vm: &VmRecord, prefix: &str) {
+    println!(
+        "{prefix}resources: {} CPUs, {} MiB RAM, /var {} MiB, store {} MiB",
+        vm.resources.cpus,
+        vm.resources.memory_mib,
+        vm.resources.var_disk_mib,
+        vm.resources.store_disk_mib
+    );
     if let Some(profile) = &vm.profile_path {
         println!(
             "{prefix}profile: {}",
@@ -2084,6 +2212,12 @@ fn print_record_profile(vm: &VmRecord, prefix: &str) {
     }
     if !vm.packages.is_empty() {
         println!("{prefix}packages: {}", vm.packages.join(", "));
+    }
+    if !vm.guest_modules.is_empty() {
+        println!(
+            "{prefix}guest modules: {}",
+            serde_json::to_string(&vm.guest_modules).unwrap()
+        );
     }
     print_links(vm, prefix);
 }
@@ -2163,7 +2297,10 @@ fn print_remove(output: &VmRemoveOutput) {
     }
 }
 
-fn render_instance_flake() -> String {
+fn render_instance_flake(record: &VmRecord) -> String {
+    let modules = (0..record.guest_modules.len())
+        .map(|index| format!(" ./guest-modules/{index}/default.nix"))
+        .collect::<String>();
     format!(
         r#"{{
   description = "Argos generated microVM instance";
@@ -2179,7 +2316,7 @@ fn render_instance_flake() -> String {
     in {{
       packages.${{system}}.runner = (nixpkgs.lib.nixosSystem {{
         inherit system;
-        modules = [ microvm.nixosModules.microvm ./microvm.nix ];
+        modules = [ microvm.nixosModules.microvm ./microvm.nix{modules} ];
       }}).config.microvm.declaredRunner;
     }};
 }}
@@ -2264,8 +2401,8 @@ fn render_microvm_config(
 
   microvm = {{
     hypervisor = "qemu";
-    vcpu = 4;
-    mem = 4096;
+    vcpu = {cpus};
+    mem = {memory_mib};
     socket = "control.socket";
     writableStoreOverlay = "/nix/.rw-store";
     interfaces = [
@@ -2276,8 +2413,8 @@ fn render_microvm_config(
 {app_forwards}
     ];
     volumes = [
-      {{ mountPoint = "/var"; image = "var.img"; size = 1024; }}
-      {{ mountPoint = config.microvm.writableStoreOverlay; image = "nix-store-overlay.img"; size = 8192; }}
+      {{ mountPoint = "/var"; image = "var.img"; size = {var_disk_mib}; }}
+      {{ mountPoint = config.microvm.writableStoreOverlay; image = "nix-store-overlay.img"; size = {store_disk_mib}; }}
     ];
     shares = [
       {{
@@ -2305,6 +2442,10 @@ fn render_microvm_config(
         packages = packages,
         firewall_ports = firewall_ports,
         app_forwards = app_forwards,
+        cpus = record.resources.cpus,
+        memory_mib = record.resources.memory_mib,
+        var_disk_mib = record.resources.var_disk_mib,
+        store_disk_mib = record.resources.store_disk_mib,
     )
 }
 
@@ -2592,6 +2733,28 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capacity_estimates_exclude_self_and_stopped_guests() {
+        let record: VmRecord = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "id": "new", "name": "New", "host": "local", "status": "stopped"
+        }))
+        .unwrap();
+        let mut other = record.clone();
+        other.id = "other".into();
+        other.status = "running".into();
+        let memory = "MemTotal: 6291456 kB\nMemAvailable: 2097152 kB\n";
+        assert_eq!(
+            capacity_warnings(&record, &[record.clone(), other.clone()], memory).len(),
+            2
+        );
+        other.status = "stopped".into();
+        assert_eq!(
+            capacity_warnings(&record, &[record.clone(), other], memory).len(),
+            1
+        );
+        assert!(capacity_warnings(&record, &[], "unavailable").is_empty());
+    }
 
     #[test]
     fn accepted_ids_produce_valid_guest_hostnames() {

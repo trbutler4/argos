@@ -264,7 +264,7 @@ import stat
 import sys
 
 args = sys.argv[1:]
-if len(args) < 4 or args[:2] != ["build", ".#runner"] or "--out-link" not in args:
+if len(args) < 4 or args[:2] != ["build", "path:.#runner"] or "--out-link" not in args:
     print("unexpected fake nix args", args, file=sys.stderr)
     sys.exit(9)
 out = pathlib.Path(args[args.index("--out-link") + 1])

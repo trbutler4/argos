@@ -81,6 +81,8 @@ pub(crate) struct VmRecord {
     #[serde(default)]
     pub(crate) packages: Vec<String>,
     #[serde(default)]
+    pub(crate) guest_modules: Vec<String>,
+    #[serde(default)]
     pub(crate) ports: Vec<VmPortMapping>,
     #[serde(default)]
     pub(crate) repo_path: Option<String>,
@@ -242,6 +244,14 @@ pub(super) fn validate_record(record: &VmRecord, path: &Path) -> Result<(), VmEr
         return Err(invalid(path, "invalid id"));
     }
     validate_resources(&record.resources, path)?;
+    if record.guest_modules.len() > 32
+        || record
+            .guest_modules
+            .iter()
+            .any(|module| !Path::new(module).is_absolute() || module.chars().any(char::is_control))
+    {
+        return Err(invalid(path, "invalid guest_modules"));
+    }
     if let Some(workdir) = &record.guest_workdir
         && (!workdir.starts_with('/') || workdir.chars().any(|c| c == '\0' || c.is_control()))
     {
