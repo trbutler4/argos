@@ -5,6 +5,19 @@ section when preparing a release. Release dates are recorded by GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- Profile-defined VM CPU, memory, `/var`, and writable Nix store disk resources,
+  with advisory host capacity warnings and guards against implicit disk resizing.
+- Declarative, snapshotted guest NixOS module files or bundles that survive updates.
+- `vm fetch` for checksummed, no-overwrite guest artifact retrieval over trusted SSH.
+- An opt-in headless Android emulator and Maestro guest profile example.
+
+### Fixed
+
+- Nix runner builds use bounded source-only staging, excluding runtime sockets,
+  disk images, SSH keys and repository metadata without requiring a private Git repo.
+
 ## [0.2.0]
 
 ### Changed

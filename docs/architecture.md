@@ -182,8 +182,9 @@ helper. Do not promise a particular microvm.nix dynamic-creation API before test
 
 ## 5. Process and session lifetime
 
-Argos is not a process manager. A repo profile may declare guest packages and
-guest ports, but project processes are started manually or by repo-owned tooling
+Argos is not a process manager. A repo profile may declare guest packages,
+resources, snapshotted NixOS modules and guest ports, but project processes are
+started manually or by repo-owned tooling
 inside guest tmux. That tooling may be devenv, just, make, docker-compatible
 commands or direct language toolchains. Argos should not model or supervise
 Postgres, Redis, API servers or frontend processes.

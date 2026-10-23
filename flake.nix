@@ -34,7 +34,7 @@
             postInstall = ''
               install -Dm644 examples/connect.tmux.conf $out/share/argos/connect.tmux.conf
               wrapProgram $out/bin/argos \
-                --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.tmux pkgs.openssh pkgs.git ]}
+                --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.tmux pkgs.openssh pkgs.git pkgs.coreutils ]}
             '' + pkgs.lib.optionalString
               (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) (installCompletions "$out/bin/argos");
             meta = {

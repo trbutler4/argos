@@ -21,6 +21,12 @@ Implemented:
 - A basic TUI over the same session and VM model.
 - Repo profiles through `.argos.toml`.
 - Per-VM host port allocation for services running inside the guest.
+- Profile-defined CPU, memory and persistent disk resources.
+- Snapshotted guest NixOS modules and clean, runtime-free Nix build inputs.
+- Checksummed retrieval of guest artifacts with `argos vm fetch`.
+
+See [Guest profiles and artifacts](docs/guest-profiles.md) for the configuration
+contract and the opt-in [Android example](examples/android/profile.toml).
 
 Not implemented yet:
 

@@ -1,0 +1,17 @@
+# Opt-in Android task environment. Modules are relative to this profile.
+[workspace]
+workdir = "/workspace/repo"
+
+[vm]
+packages = ["nodejs_24", "jdk21", "maestro", "python3", "curl", "jq"]
+modules = ["android.nix"]
+
+[vm.resources]
+cpus = 4
+memory_mib = 6144
+var_disk_mib = 32768
+store_disk_mib = 16384
+
+[[ports]]
+name = "metro"
+guest = 8081
