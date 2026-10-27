@@ -5,7 +5,20 @@ section when preparing a release. Release dates are recorded by GitHub Releases.
 
 ## [Unreleased]
 
+
+## [0.3.0]
+
 ### Added
+
+- Explicit `vm.defaults.share_host_git = false` isolates guest environments from
+  controller SSH private keys and host Git configuration, with persisted policy.
+- Global `vm.defaults.modules` merges snapshotted guest modules with repository
+  profiles, so agent tooling can be installed without replacing project setup.
+
+- Passive `agents list [--state-dir PATH] [--json]` and responsive VM picker
+  overview for Jcode client-connected debug sessions, with scoped counts,
+  observation timestamps, per-guest errors and visibly stale cached metadata.
+  Discovery never enables debug control, starts guests/daemons or changes SSH trust.
 
 - Profile-defined VM CPU, memory, `/var`, and writable Nix store disk resources,
   with advisory host capacity warnings and guards against implicit disk resizing.

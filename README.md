@@ -101,6 +101,9 @@ config_path = "/absolute/path/to/tmux.conf"
 [vm.defaults]
 # Installed in every VM created with this Argos config. These are Nixpkgs attrs.
 packages = ["ripgrep", "jq", "zsh"]
+# Optional guest NixOS modules or module bundles, snapshotted into each VM.
+# Relative paths resolve from this Argos config file's directory.
+# modules = ["guest-base.nix", "guest-tools"]
 
 [[vm.defaults.files]]
 # Non-secret file copied into every VM at activation time.
@@ -289,6 +292,13 @@ Argos installs the listed Nixpkgs package attributes in the guest. It maps each 
 
 Global `[vm.defaults]` packages from the Argos config are installed before repo packages, with duplicates removed. Global `[[vm.defaults.files]]` entries are intended for non-secret dotfiles and small helper config. Relative `source_path` values are resolved relative to the Argos config file.
 
+`[vm.defaults].modules` supplies guest NixOS module files or bundles before the
+repo profile's `[vm].modules`. Relative module paths resolve from the Argos
+config file's directory. Sources are snapshotted into the VM's build inputs,
+not loaded from mutable host paths on each boot. Keep these modules non-secret:
+their contents enter the Nix store. Use explicit `vm update` to apply changed
+defaults to an existing VM, then stop/start a running VM to activate its rebuild.
+
 `argos vm show <id>` prints the assigned mappings, for example:
 
 ```text
@@ -335,6 +345,66 @@ argos hosts status --config ./config.local.toml --json
 The status helper reports Argos version, state paths, required tools, and `/dev/kvm` access.
 
 ## TUI
+
+### Guest Jcode overview
+
+```sh
+argos agents list
+argos agents list --state-dir /absolute/path/to/state --json
+```
+
+This is a passive overview of **client-connected Jcode debug sessions** inside
+running, locally recorded Argos VMs. It is not a count of all persisted sessions
+or all headless agents. A successful empty array means only that the selected
+guest debug server reported no client-connected sessions. Busy sessions may have
+null model, provider, working directory, and token-usage fields. Missing metadata
+stays unknown. No prompts or transcripts are requested.
+`is_processing` is upstream swarm-status metadata, not an independent guarantee
+that a model is running or idle. Null/missing state remains unknown.
+
+The version-1 JSON envelope contains `schema_version`, `observed_at_unix_ms`,
+`scope = "client_connected_debug_sessions"`, and `vms`. Each VM result includes
+`vm_id`, `status`, `scope`, `observed_at_unix_ms`, `sessions`, and a nullable
+structured `error` with `code` and `message`. Session records expose the debug
+API's session id, friendly name, provider/model, processing state, working
+directory, swarm id, status/detail, and token usage. Unknown upstream fields are
+ignored. Remote labels are sanitized before display. Existing session-list and
+VM-list JSON contracts are unchanged.
+
+Operational/partial probe failure exits 1 while retaining healthy VM results.
+Stopped VMs are labeled `stopped`, not probed, and do not themselves cause failure.
+Missing Jcode, disabled or unavailable debug control, missing/untrusted host keys,
+authentication, unreachable guests, deadlines, output limits, and malformed JSON
+remain errors, never successful zero-session counts. Invalid arguments exit 2.
+
+The guest must already have Jcode installed and its local debug control explicitly
+enabled by its deployment. Refresh invokes only
+`jcode --no-update debug sessions`. It never enables debug control, starts a daemon
+or VM, creates a session, keyscans, or rewrites SSH trust. The stable API-bridge
+session list is deliberately not used because its retention writes and idle
+semantics are unsuitable for passive discovery. Debug socket selection uses
+Jcode's default main socket resolution. A debug `--socket`, if added in the future,
+must name the **main** socket, not the derived `-debug` socket. Multiple independent
+Jcode servers/sockets are not aggregated.
+
+Probes require a recorded IPv4 loopback SSH endpoint and an existing regular
+per-guest `known_hosts` file. They ignore user SSH configuration, enforce strict
+host-key checking, and disable forwarding, agent forwarding and SSH masters.
+CLI probes run at most four at once with three-second deadlines and the shared
+four-MiB capture limit. Picker probes use the configured parallelism (capped at
+16) and deadline, with the same cancellation and capture limits.
+
+VM picker rows show scoped counts or probe errors. The selected VM detail pane
+shows session metadata and observation timestamps. Failed refreshes retain the
+last successful data visibly marked **STALE**, alongside the latest error.
+Refreshes coalesce and cancel/join before attachment or quit. **Enter still opens
+normal guest tmux**, not a Jcode session or control operation. The cache is
+in-memory for the picker lifetime, not a persisted inventory.
+Discovery runs when the picker opens and on manual **r** refresh. There is no
+automatic polling interval. Terminals below 20 rows hide the detail pane to keep
+the selected row and navigation controls usable.
+The detail preview bounds label lengths and previews at most 20 sessions, clipped
+to terminal space. Use `agents list --json` for the complete capped probe result.
 
 ```sh
 argos tui --config ./config.local.toml
@@ -415,11 +485,16 @@ nix develop --command bash -c '
   python3 tests/config_cli.py &&
   python3 tests/host_status.py &&
   python3 tests/vm_list.py &&
+  python3 tests/vm_resources.py &&
+  python3 tests/vm_modules.py &&
+  python3 tests/vm_fetch.py &&
+  python3 tests/credential_sharing.py &&
   python3 tests/remote_ssh.py &&
   python3 tests/remote_attach.py &&
   python3 tests/attach_tmux.py &&
   python3 tests/connect.py &&
   python3 tests/tui.py &&
+  python3 tests/jcode.py &&
   python3 tests/completions.py
 '
 ```

@@ -46,6 +46,11 @@ jobs:
             python3 tests/release.py &&
             python3 tests/host_status.py &&
             python3 tests/vm_list.py &&
+            python3 tests/vm_resources.py &&
+            python3 tests/vm_modules.py &&
+            python3 tests/vm_fetch.py &&
+            python3 tests/credential_sharing.py &&
+            python3 tests/jcode.py &&
             python3 tests/local_tmux.py &&
             python3 tests/config_cli.py &&
             python3 tests/remote_ssh.py &&

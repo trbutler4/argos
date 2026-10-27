@@ -138,6 +138,20 @@ and first-use trust live in `vm/guest.rs`. Lifecycle commands remain explicit in
 their useful categories until presentation; no generic backend or task framework
 is required for these boundaries.
 
+`jcode.rs` is a read-only guest observation layer shared by `agents list` and
+picker refresh. It consumes VM snapshot records without extending persisted VM
+state or changing the existing list contracts. Its versioned result explicitly
+scopes observations to client-connected debug sessions, not persisted/headless
+inventory. Strict loopback SSH probes require existing guest trust and never use
+interactive first-use keyscan or start/enable Jcode. Like artifact retrieval,
+the passive transport ignores user SSH config and disables forwarding/masters.
+Workers bound concurrency, output and deadlines through the shared cancellable
+process runner. Per-VM results stream after the local scan, independently of host
+tmux discovery. The picker retains last successful metadata on probe failure,
+shows stale timestamps and current errors, and leaves attachment with the normal
+VM tmux sessions layer. No prompt/transcript or API-bridge retention operation is
+part of refresh. Default Jcode socket resolution observes one main server only.
+
 ## 4. A managed task environment
 
 Each environment has a stable ID, a display name, a home machine, a project URL,

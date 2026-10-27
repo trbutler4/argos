@@ -83,6 +83,8 @@ pub(crate) struct VmRecord {
     #[serde(default)]
     pub(crate) guest_modules: Vec<String>,
     #[serde(default)]
+    pub(crate) default_guest_modules: Vec<String>,
+    #[serde(default)]
     pub(crate) ports: Vec<VmPortMapping>,
     #[serde(default)]
     pub(crate) repo_path: Option<String>,
@@ -116,6 +118,12 @@ pub(crate) struct VmRecord {
     pub(crate) started_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub(crate) resources: VmResources,
+    #[serde(default = "default_share_host_git")]
+    pub(crate) share_host_git: bool,
+}
+
+fn default_share_host_git() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

@@ -639,7 +639,8 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
     let guest_workdir = profile.profile.workspace.workdir.clone();
     let packages = packages_with_defaults(&profile.profile, &vm_defaults);
     let ports = allocate_port_mappings(&profile.profile, &state_root)?;
-    let guest_modules = resolved_profile_modules(&profile)?;
+    let default_guest_modules = resolve_default_modules(&vm_defaults)?;
+    let guest_modules = merge_guest_modules(&default_guest_modules, &profile)?;
     let ssh_port = ssh_port_for_id(&id);
     let record = VmRecord {
         schema_version: 1,
@@ -653,6 +654,7 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
         guest_workdir: Some(guest_workdir),
         packages,
         guest_modules,
+        default_guest_modules,
         ports,
         repo_path: repo_path.as_ref().map(|path| path.display().to_string()),
         workdir: Some(workdir.display().to_string()),
@@ -670,6 +672,7 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
         updated_at_unix_ms: Some(now),
         started_at_unix_ms: None,
         resources: profile.profile.vm.resources.clone(),
+        share_host_git: vm_defaults.share_host_git,
     };
     validate_record(&record, &state_file)?;
     Ok(VmCreateOutput {
@@ -716,12 +719,15 @@ fn update_vm(options: UpdateOptions) -> Result<VmUpdateOutput, VmError> {
     let state_file = state_root.join("vms").join(format!("{}.json", options.id));
     let mut record = load_record(&state_file)?;
     let previous_record = record.clone();
+    if let Some(share_host_git) = vm_defaults.share_host_git_override {
+        record.share_host_git = share_host_git;
+    }
     let loaded_profile = load_update_profile(
         options.profile.as_deref(),
         record.repo_path.as_deref(),
         record.profile_path.as_deref(),
     )?;
-    if loaded_profile.path.is_none() && !record.guest_modules.is_empty() {
+    if loaded_profile.path.is_none() && record.guest_modules != record.default_guest_modules {
         return Err(state_error(
             "recorded guest module profile is unavailable; provide an explicit --profile to update or remove modules",
         ));
@@ -737,7 +743,8 @@ fn update_vm(options: UpdateOptions) -> Result<VmUpdateOutput, VmError> {
         .map(|path| path.display().to_string());
     record.guest_workdir = Some(loaded_profile.profile.workspace.workdir.clone());
     record.packages = packages_with_defaults(&loaded_profile.profile, &vm_defaults);
-    record.guest_modules = resolved_profile_modules(&loaded_profile)?;
+    record.default_guest_modules = resolve_default_modules(&vm_defaults)?;
+    record.guest_modules = merge_guest_modules(&record.default_guest_modules, &loaded_profile)?;
     record.resources = loaded_profile.profile.vm.resources.clone();
     guard_disk_changes(&previous_record, &record, &state_root)?;
     record.ports =
@@ -1639,17 +1646,40 @@ fn apply_default_cloned_profile(output: &mut VmCreateOutput) -> Result<(), VmErr
     output.record.guest_workdir = Some(profile.workspace.workdir.clone());
     output.record.packages = profile.vm.packages.clone();
     output.record.resources = profile.vm.resources.clone();
-    output.record.guest_modules = source::resolve_modules(&profile_path, &profile.vm.modules)?;
+    output.record.guest_modules = merge_guest_modules(
+        &output.record.default_guest_modules,
+        &LoadedProfile {
+            profile: profile.clone(),
+            path: Some(profile_path.clone()),
+        },
+    )?;
     state::validate_resources(&output.record.resources, &profile_path)?;
     output.record.ports = allocate_port_mappings(&profile, &state_root)?;
     Ok(())
 }
 
-fn resolved_profile_modules(profile: &LoadedProfile) -> Result<Vec<String>, VmError> {
-    match profile.path.as_deref() {
-        Some(path) => source::resolve_modules(path, &profile.profile.vm.modules),
-        None => Ok(Vec::new()),
+fn resolve_default_modules(defaults: &config::VmDefaults) -> Result<Vec<String>, VmError> {
+    source::resolve_modules(Path::new("/"), &defaults.modules)
+}
+
+fn merge_guest_modules(
+    defaults: &[String],
+    profile: &LoadedProfile,
+) -> Result<Vec<String>, VmError> {
+    let profile_modules = match profile.path.as_deref() {
+        Some(path) => source::resolve_modules(path, &profile.profile.vm.modules)?,
+        None => Vec::new(),
+    };
+    let mut merged = Vec::new();
+    for module in defaults.iter().chain(profile_modules.iter()) {
+        if !merged.iter().any(|existing| existing == module) {
+            merged.push(module.clone());
+        }
     }
+    if merged.len() > 32 {
+        return Err(state_error("at most 32 guest modules may be declared"));
+    }
+    Ok(merged)
 }
 
 // Never resize or truncate an existing filesystem image. An exact raw-size
@@ -2352,8 +2382,8 @@ fn render_microvm_config(
     let tmux_block = render_tmux_config_block(tmux_config);
     let default_files_block = render_default_files_block(default_files);
     let tmux_store_shares = render_tmux_store_shares(tmux_config);
-    let host_git_shares = render_host_git_shares();
-    let git_config = render_git_config_text();
+    let host_git_shares = render_host_git_shares(record.share_host_git);
+    let git_config = render_git_config_text(record.share_host_git);
     let workspace_share = render_workspace_share(record);
     let workspace_virtiofsd = render_workspace_virtiofsd(record);
     let packages = render_system_packages(record);
@@ -2603,7 +2633,10 @@ fn render_tmux_store_shares(tmux_config: Option<&str>) -> String {
     out
 }
 
-fn render_host_git_shares() -> String {
+fn render_host_git_shares(share_host_git: bool) -> String {
+    if !share_host_git {
+        return String::new();
+    }
     let Some(home) = std::env::var_os("HOME") else {
         return String::new();
     };
@@ -2623,10 +2656,10 @@ fn render_host_git_shares() -> String {
     )
 }
 
-fn render_git_config_text() -> String {
+fn render_git_config_text(share_host_git: bool) -> String {
     let mut text =
         String::from("[safe]\n\tdirectory = /workspace/repo\n\tdirectory = /workspace\n");
-    if let Some(home) = std::env::var_os("HOME") {
+    if share_host_git && let Some(home) = std::env::var_os("HOME") {
         let path = Path::new(&home).join(".gitconfig");
         if let Ok(host_config) = fs::read_to_string(path) {
             text.push_str("\n# Host git config copied by Argos for VM git workflows.\n");
@@ -2754,6 +2787,28 @@ mod tests {
             1
         );
         assert!(capacity_warnings(&record, &[], "unavailable").is_empty());
+    }
+
+    #[test]
+    fn old_vm_records_default_to_host_git_sharing() {
+        let record: VmRecord = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "id": "legacy", "name": "Legacy", "host": "local", "status": "stopped"
+        }))
+        .unwrap();
+        assert!(record.share_host_git);
+    }
+
+    #[test]
+    fn disabled_host_git_sharing_renders_no_ssh_mount_or_host_gitconfig() {
+        let record: VmRecord = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "id": "private", "name": "Private", "host": "local", "status": "stopped",
+            "share_host_git": false
+        }))
+        .unwrap();
+        let rendered = render_microvm_config(&record, None, &[]);
+        assert!(!rendered.contains("tag = \"host-ssh\""));
+        assert!(!rendered.contains("Host git config copied by Argos"));
+        assert!(rendered.contains("environment.etc.\"gitconfig\".text"));
     }
 
     #[test]

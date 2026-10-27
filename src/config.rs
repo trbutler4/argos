@@ -33,13 +33,28 @@ pub struct GuestTmuxConfig {
     pub config_path: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VmDefaultsConfig {
+    #[serde(default)]
+    pub share_host_git: Option<bool>,
     #[serde(default)]
     pub packages: Vec<String>,
     #[serde(default)]
     pub files: Vec<VmDefaultFileConfig>,
+    #[serde(default)]
+    pub modules: Vec<String>,
+}
+
+impl Default for VmDefaultsConfig {
+    fn default() -> Self {
+        Self {
+            share_host_git: Some(true),
+            packages: Vec::new(),
+            files: Vec::new(),
+            modules: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -54,10 +69,25 @@ pub struct VmDefaultFileConfig {
     pub mode: Option<String>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct VmDefaults {
+    pub share_host_git: bool,
+    pub share_host_git_override: Option<bool>,
     pub packages: Vec<String>,
     pub files: Vec<VmDefaultFile>,
+    pub modules: Vec<String>,
+}
+
+impl Default for VmDefaults {
+    fn default() -> Self {
+        Self {
+            share_host_git: true,
+            share_host_git_override: None,
+            packages: Vec::new(),
+            files: Vec::new(),
+            modules: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -209,8 +239,27 @@ pub fn vm_defaults(path: Option<&Path>) -> Result<VmDefaults, String> {
     }
 
     Ok(VmDefaults {
+        share_host_git: defaults.share_host_git.unwrap_or(true),
+        share_host_git_override: defaults.share_host_git,
         packages: defaults.packages.clone(),
         files,
+        modules: defaults
+            .modules
+            .iter()
+            .map(|module| {
+                let path = Path::new(module);
+                if path.is_absolute() {
+                    path.to_string_lossy().into_owned()
+                } else {
+                    config_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(path)
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            })
+            .collect(),
     })
 }
 
@@ -384,6 +433,8 @@ mod tests {
             parse("schema_version=1\n[client]\nmachine_id='local'\n[machines.local]\n").unwrap();
         assert_eq!(c.client.connect_timeout_seconds, 3);
         assert_eq!(c.client.max_parallel_probes, 4);
+        assert!(vm_defaults_from_config(&c).share_host_git);
+        assert_eq!(VmDefaultsConfig::default().share_host_git, Some(true));
     }
     #[test]
     fn rejects_unknown() {
@@ -410,6 +461,30 @@ mod tests {
         let defaults = c.vm.unwrap().defaults.unwrap();
         assert_eq!(defaults.packages, vec!["ripgrep"]);
         assert_eq!(defaults.files[0].target, "/root/.config/example");
+    }
+
+    #[test]
+    fn vm_git_sharing_can_be_disabled() {
+        let c = parse(
+            "schema_version=1\n[client]\nmachine_id='local'\n[machines.local]\n[vm.defaults]\nshare_host_git=false\n",
+        )
+        .unwrap();
+        assert_eq!(c.vm.unwrap().defaults.unwrap().share_host_git, Some(false));
+    }
+
+    fn vm_defaults_from_config(config: &Config) -> VmDefaults {
+        config
+            .vm
+            .as_ref()
+            .and_then(|vm| vm.defaults.as_ref())
+            .map(|defaults| VmDefaults {
+                share_host_git: defaults.share_host_git.unwrap_or(true),
+                share_host_git_override: defaults.share_host_git,
+                packages: defaults.packages.clone(),
+                files: Vec::new(),
+                modules: Vec::new(),
+            })
+            .unwrap_or_default()
     }
 
     #[test]

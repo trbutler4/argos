@@ -1,5 +1,5 @@
 //! Shared CLI discovery and one cancellable, bounded picker refresh job.
-use crate::{config, process::Cancellation, ssh, tmux, vm};
+use crate::{config, jcode, process::Cancellation, ssh, tmux, vm};
 use serde::Serialize;
 use std::{
     io,
@@ -239,6 +239,7 @@ pub(crate) fn discover_snapshot(request: &SnapshotRequest) -> Snapshot {
 pub(crate) enum Update {
     Host(Host),
     Vms(Result<vm::VmSnapshot, vm::VmError>),
+    Agents(jcode::Guest),
     Finished,
 }
 
@@ -262,7 +263,19 @@ impl RefreshJob {
                     scope.spawn(|| {
                         let result = vm::snapshot_cancellable(state_dir, &worker_cancel);
                         if !worker_cancel.is_cancelled() {
+                            let guests = result.as_ref().ok().cloned();
                             let _ = tx.send(Update::Vms(result));
+                            if let Some(snapshot) = guests {
+                                jcode::probe_guests(
+                                    &snapshot,
+                                    request.parallel,
+                                    Duration::from_secs(request.timeout_secs),
+                                    &worker_cancel,
+                                    |guest| {
+                                        let _ = tx.send(Update::Agents(guest));
+                                    },
+                                );
+                            }
                         }
                     });
                     probe_hosts(

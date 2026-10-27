@@ -32,32 +32,70 @@ def main():
         (bundle / "extra.nix").write_text('{ environment.variables.MODULE_TEST = "old"; }\n')
         plain = root / "plain.nix"
         plain.write_text('{ environment.variables.PLAIN_TEST = "yes"; }\n')
+        default_module = root / "default.nix"
+        default_module.write_text('{ environment.variables.DEFAULT_TEST = "yes"; }\n')
+        config = root / "argos.toml"
+        config.write_text(
+            f'''schema_version = 1
+[client]
+machine_id = "local"
+[machines.local]
+[vm.defaults]
+modules = ["{default_module.name}"]
+'''
+        )
         profile = root / "profile.toml"
         profile.write_text('[vm]\nmodules = ["bundle with space", "plain.nix"]\n')
         vm_id = f"module-test-{os.getpid()}"
-        args = ["vm", "create", "Module test", "--id", vm_id, "--profile", str(profile)]
+        args = ["vm", "create", "Module test", "--id", vm_id, "--profile", str(profile), "--config", str(config)]
         dry = run(*args, "--dry-run")
         assert not state.exists(), "dry-run wrote VM state"
-        assert json.loads(dry.stdout)["record"]["guest_modules"] == [str(bundle), str(plain)]
+        assert json.loads(dry.stdout)["record"]["guest_modules"] == [str(default_module), str(bundle), str(plain)]
+        assert json.loads(dry.stdout)["record"]["default_guest_modules"] == [str(default_module)]
         result = json.loads(run(*args).stdout)
         instance = Path(result["instance_dir"])
         snapshot = instance / "guest-modules"
-        assert (snapshot / "0/extra.nix").read_text().find('"old"') >= 0
-        assert (snapshot / "1/default.nix").read_text() == plain.read_text()
+        assert (snapshot / "0/default.nix").read_text() == default_module.read_text()
+        assert (snapshot / "1/extra.nix").read_text().find('"old"') >= 0
+        assert (snapshot / "2/default.nix").read_text() == plain.read_text()
         flake = (instance / "flake.nix").read_text()
         assert "./guest-modules/0/default.nix" in flake
         assert "./guest-modules/1/default.nix" in flake
+        assert "./guest-modules/2/default.nix" in flake
         (bundle / "extra.nix").write_text('{ environment.variables.MODULE_TEST = "new"; }\n')
-        assert '"old"' in (snapshot / "0/extra.nix").read_text(), "start inputs are not immutable snapshots"
-        run("vm", "update", vm_id, "--profile", str(profile))
-        assert '"new"' in (snapshot / "0/extra.nix").read_text()
-        assert "./guest-modules/1/default.nix" in (instance / "flake.nix").read_text()
+        assert '"old"' in (snapshot / "1/extra.nix").read_text(), "start inputs are not immutable snapshots"
+        run("vm", "update", vm_id, "--profile", str(profile), "--config", str(config))
+        assert '"new"' in (snapshot / "1/extra.nix").read_text()
+        assert "./guest-modules/2/default.nix" in (instance / "flake.nix").read_text()
+
+        # Config-only defaults resolve relative to Argos config and survive update.
+        config_only_id = f"config-module-{os.getpid()}"
+        config_only = run(
+            "vm", "create", "Config module", "--id", config_only_id,
+            "--config", str(config), "--dry-run",
+        )
+        config_only_record = json.loads(config_only.stdout)["record"]
+        assert config_only_record["guest_modules"] == [str(default_module)]
+        assert config_only_record["default_guest_modules"] == [str(default_module)]
+        config_only_result = json.loads(
+            run("vm", "create", "Config module", "--id", config_only_id, "--config", str(config)).stdout
+        )
+        config_only_state = json.loads(
+            (state / "vms" / f"{config_only_id}.json").read_text()
+        )
+        assert config_only_state["guest_modules"] == [str(default_module)]
+        assert config_only_state["default_guest_modules"] == [str(default_module)]
+        updated_config_only = json.loads(
+            run("vm", "update", config_only_id, "--config", str(config)).stdout
+        )
+        assert updated_config_only["record"]["guest_modules"] == [str(default_module)]
+        assert Path(config_only_result["microvm_config"]).is_file()
 
         # Dry-run must reject special files buried in a module bundle, without
         # changing the previously staged inputs or record.
         before = (state / "vms" / f"{vm_id}.json").read_bytes()
         os.symlink(plain, bundle / "forbidden.nix")
-        bad = run("vm", "update", vm_id, "--profile", str(profile), "--dry-run", check=False)
+        bad = run("vm", "update", vm_id, "--profile", str(profile), "--config", str(config), "--dry-run", check=False)
         assert bad.returncode != 0 and "symlink" in bad.stderr, bad.stderr
         assert (state / "vms" / f"{vm_id}.json").read_bytes() == before
         (bundle / "forbidden.nix").unlink()
@@ -91,7 +129,7 @@ raise SystemExit(1)
             assert failure.returncode != 0, failure.stdout
         observation = json.loads(observed.read_text())
         files = observation["files"]
-        assert "flake.nix" in files and "guest-modules/0/extra.nix" in files, files
+        assert "flake.nix" in files and "guest-modules/1/extra.nix" in files, files
         assert not {"var.img", "known_hosts", ".git", "control.socket"}.intersection(files), files
         assert not Path(observation["path"]).exists(), "failed build left source staging behind"
         assert (instance / "var.img").read_bytes() == b"persistent disk"
@@ -99,7 +137,7 @@ raise SystemExit(1)
         profile.unlink()
         missing_profile = run("vm", "update", vm_id, "--dry-run", check=False)
         assert missing_profile.returncode != 0 and "profile is unavailable" in missing_profile.stderr
-        assert (snapshot / "0/extra.nix").is_file()
+        assert (snapshot / "1/extra.nix").is_file()
 
         # Old schema-1 records need no migration before read-only discovery.
         record_path = state / "vms" / f"{vm_id}.json"

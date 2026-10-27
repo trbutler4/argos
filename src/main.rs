@@ -31,6 +31,7 @@ mod connect {
     }
 }
 mod host;
+mod jcode;
 mod process;
 mod sessions;
 mod ssh;
@@ -46,6 +47,11 @@ struct Cli {
 }
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Read-only overview of Jcode client-connected sessions in local VMs.
+    Agents {
+        #[command(subcommand)]
+        command: AgentsCommand,
+    },
     /// Open the managed session picker or attach to a host/VM target.
     Connect {
         #[arg(add = ArgValueCandidates::new(completions::attach_targets))]
@@ -117,6 +123,17 @@ enum Command {
     Task {
         #[command(subcommand)]
         command: TaskCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AgentsCommand {
+    /// Probe running guests without starting Jcode or changing SSH trust.
+    List {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        state_dir: Option<std::path::PathBuf>,
     },
 }
 
@@ -409,6 +426,9 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     };
     match command {
+        Command::Agents {
+            command: AgentsCommand::List { json, state_dir },
+        } => jcode::list(state_dir, json),
         Command::Connect {
             target,
             socket,
