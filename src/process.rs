@@ -67,13 +67,20 @@ impl std::error::Error for RunError {
     }
 }
 
-struct CapturedChild {
+pub(crate) struct CapturedChild {
     child: Child,
     reaped: bool,
 }
 
 impl CapturedChild {
-    fn exited(&mut self) -> io::Result<bool> {
+    pub(crate) fn new(child: Child) -> Self {
+        Self {
+            child,
+            reaped: false,
+        }
+    }
+
+    pub(crate) fn exited(&mut self) -> io::Result<bool> {
         #[cfg(target_os = "linux")]
         {
             use nix::{
@@ -103,7 +110,7 @@ impl CapturedChild {
         }
     }
 
-    fn finish(&mut self) -> io::Result<ExitStatus> {
+    pub(crate) fn finish(&mut self) -> io::Result<ExitStatus> {
         self.kill_group();
         let result = self.child.wait();
         self.reaped = result.is_ok();
@@ -139,10 +146,7 @@ pub(crate) fn run_cancellable(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let mut child = CapturedChild {
-        child: command.spawn().map_err(RunError::Spawn)?,
-        reaped: false,
-    };
+    let mut child = CapturedChild::new(command.spawn().map_err(RunError::Spawn)?);
     let mut stdout = child.child.stdout.take().expect("stdout piped");
     let mut stderr = child.child.stderr.take().expect("stderr piped");
     for fd in [stdout.as_raw_fd(), stderr.as_raw_fd()] {

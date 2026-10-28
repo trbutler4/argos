@@ -5,6 +5,15 @@ section when preparing a release. Release dates are recorded by GitHub Releases.
 
 ## [Unreleased]
 
+
+## [0.3.2]
+
+### Fixed
+
+- Artifact retrieval builds on macOS by sharing the platform-aware child-process
+  wait and cleanup helper instead of importing Linux-only `waitid` APIs. Linux
+  retains its unreaped process-group leader through artifact transfer cleanup.
+
 ## [0.3.1]
 
 ### Fixed

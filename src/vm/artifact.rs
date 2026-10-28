@@ -193,29 +193,16 @@ fn transfer(mut c: Command, file: &fs::File, deadline: Instant) -> Result<(), Vm
         ))
         .stderr(Stdio::null())
         .process_group(0);
-    let mut child = c
-        .spawn()
-        .map_err(|_| failure("cannot start artifact transfer"))?;
+    let mut child = process::CapturedChild::new(
+        c.spawn()
+            .map_err(|_| failure("cannot start artifact transfer"))?,
+    );
     loop {
-        use nix::{
-            errno::Errno,
-            sys::wait::{Id, WaitPidFlag, WaitStatus, waitid},
-            unistd::Pid,
-        };
-        let pid = Pid::from_raw(child.id() as i32);
-        // As in the bounded capture runner, do not reap the group leader before
-        // killing the group. Descendants must not keep writing the artifact.
-        let exited = match waitid(
-            Id::Pid(pid),
-            WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT | WaitPidFlag::WNOHANG,
-        ) {
-            Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..)) => Ok(true),
-            Ok(_) | Err(Errno::EINTR) => Ok(false),
-            Err(_) => Err(()),
-        };
+        // Share the capture runner's platform-specific wait and cleanup policy.
+        // Linux holds the group leader with WNOWAIT until group cleanup.
+        let exited = child.exited().map_err(|_| ());
         if exited == Ok(true) || exited.is_err() || Instant::now() >= deadline {
-            let _ = nix::sys::signal::killpg(pid, nix::sys::signal::Signal::SIGKILL);
-            let status = child.wait();
+            let status = child.finish();
             if exited != Ok(true) {
                 return Err(failure(
                     "artifact transfer timed out or could not be waited",
@@ -252,6 +239,22 @@ fn digest(command: Command, deadline: Instant) -> Result<String, VmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_completion_reports_exit_status() {
+        let file = OpenOptions::new().write(true).open("/dev/null").unwrap();
+        for (script, success) in [
+            ("printf artifact", true),
+            ("printf partial; exit 17", false),
+        ] {
+            let mut command = Command::new("sh");
+            command.args(["-c", script]);
+            assert_eq!(
+                transfer(command, &file, Instant::now() + Duration::from_secs(2)).is_ok(),
+                success
+            );
+        }
+    }
 
     #[test]
     fn streaming_timeout_is_bounded() {

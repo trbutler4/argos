@@ -80,9 +80,30 @@ jobs:
           overwrite: true
           retention-days: 7
 
+  darwin:
+    name: Validate native Darwin package
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@v23
+
+      - name: Validate portable process and artifact handling
+        run: |
+          nix develop --command bash -c '
+            cargo fmt --check &&
+            cargo test --locked &&
+            cargo clippy --locked --all-targets -- -D warnings
+          '
+
+      - name: Build unpatched Darwin package
+        run: nix build .#packages.aarch64-darwin.default
+
   publish:
     name: Publish Cargo version
-    needs: validate
+    needs: [validate, darwin]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
