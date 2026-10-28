@@ -5,6 +5,15 @@ section when preparing a release. Release dates are recorded by GitHub Releases.
 
 ## [Unreleased]
 
+## [0.3.1]
+
+### Fixed
+
+- VM application-port allocation skips TCP ports already bound by other host
+  processes, including VMs owned by another user. Updating a stopped VM remaps
+  occupied application ports while preserving its SSH identity and available
+  mappings. Running VM mappings remain stable. Availability probes are advisory,
+  not atomic reservations against later binds by unrelated processes.
 
 ## [0.3.0]
 

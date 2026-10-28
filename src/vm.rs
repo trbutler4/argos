@@ -11,6 +11,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
+    net::TcpListener,
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     thread,
@@ -642,6 +643,7 @@ fn create_plan(options: &CreateOptions) -> Result<VmCreateOutput, VmError> {
     let default_guest_modules = resolve_default_modules(&vm_defaults)?;
     let guest_modules = merge_guest_modules(&default_guest_modules, &profile)?;
     let ssh_port = ssh_port_for_id(&id);
+    ensure_port_available(ssh_port, "SSH")?;
     let record = VmRecord {
         schema_version: 1,
         id: id.clone(),
@@ -1552,13 +1554,15 @@ fn allocate_port_mappings(
     let mut used = used_host_ports(state_root)?;
     let mut mappings = Vec::new();
     for port in &profile.ports {
-        let Some(host) = (APP_PORT_START..=APP_PORT_END).find(|candidate| used.insert(*candidate))
+        let Some(host) = (APP_PORT_START..=APP_PORT_END)
+            .find(|candidate| !used.contains(candidate) && port_available(*candidate))
         else {
             return Err(VmError {
                 code: "state_error",
                 message: format!("no free host ports in range {APP_PORT_START}-{APP_PORT_END}"),
             });
         };
+        used.insert(host);
         mappings.push(VmPortMapping {
             name: port.name.clone(),
             guest: port.guest,
@@ -1583,18 +1587,20 @@ fn allocate_update_port_mappings(
         let key = (port.name.clone(), port.guest);
         let host = if let Some(host) = preserved.get(&key).copied()
             && !used.contains(&host)
+            && (current.status == "running" || port_available(host))
         {
             used.insert(host);
             host
         } else {
-            let Some(host) =
-                (APP_PORT_START..=APP_PORT_END).find(|candidate| used.insert(*candidate))
+            let Some(host) = (APP_PORT_START..=APP_PORT_END)
+                .find(|candidate| !used.contains(candidate) && port_available(*candidate))
             else {
                 return Err(VmError {
                     code: "state_error",
                     message: format!("no free host ports in range {APP_PORT_START}-{APP_PORT_END}"),
                 });
             };
+            used.insert(host);
             host
         };
         mappings.push(VmPortMapping {
@@ -1604,6 +1610,24 @@ fn allocate_update_port_mappings(
         });
     }
     Ok(mappings)
+}
+
+// This is only a best-effort preflight. The temporary listeners are released
+// before the VM uses the port, so it does not provide an atomic reservation.
+fn port_available(port: u16) -> bool {
+    ["127.0.0.1", "0.0.0.0"]
+        .iter()
+        .all(|address| TcpListener::bind((*address, port)).is_ok())
+}
+
+fn ensure_port_available(port: u16, kind: &str) -> Result<(), VmError> {
+    if port_available(port) {
+        Ok(())
+    } else {
+        Err(state_error(format!(
+            "SSH port {port} is unavailable; pinned {kind} port collisions are unsupported"
+        )))
+    }
 }
 
 fn used_host_ports(state_root: &Path) -> Result<BTreeSet<u16>, VmError> {
@@ -2766,6 +2790,9 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static PORT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn capacity_estimates_exclude_self_and_stopped_guests() {
@@ -2923,6 +2950,10 @@ packages = ["go", "just"]
 [[ports]]
 name = "api"
 guest = 3001
+
+[[ports]]
+name = "web"
+guest = 3002
 "#,
         )
         .unwrap();
@@ -2931,6 +2962,8 @@ guest = 3001
         assert_eq!(profile.vm.packages, vec!["go", "just"]);
         let first = allocate_port_mappings(&profile, &root).unwrap();
         assert_eq!(first[0].guest, 3001);
+        assert_eq!(first[1].guest, 3002);
+        assert_ne!(first[0].host, first[1].host);
         let vms = root.join("vms");
         fs::create_dir_all(&vms).unwrap();
         fs::write(
@@ -2941,14 +2974,100 @@ guest = 3001
                 "name": "Used",
                 "status": "created",
                 "host": "here",
-                "ports": first,
+            "ports": first,
             })
             .to_string(),
         )
         .unwrap();
         let second = allocate_port_mappings(&profile, &root).unwrap();
         assert_eq!(second[0].guest, 3001);
+        assert_eq!(second[1].guest, 3002);
         assert_ne!(second[0].host, first[0].host);
+        assert_ne!(second[1].host, first[1].host);
+        assert_ne!(second[0].host, second[1].host);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn skips_bound_loopback_port_without_changing_state_reservations() {
+        let _lock = PORT_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "argos-bound-port-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let bound_port = (APP_PORT_START..=APP_PORT_END)
+            .find(|port| port_available(*port))
+            .unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", bound_port)).unwrap();
+        let profile = RepoProfile {
+            ports: vec![ProfilePort {
+                name: "api".into(),
+                guest: 3001,
+            }],
+            ..Default::default()
+        };
+
+        let allocated = allocate_port_mappings(&profile, &root).unwrap();
+        assert_ne!(allocated[0].host, bound_port);
+        drop(listener);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remaps_bound_preserved_port_and_leaves_other_records_untouched() {
+        let _lock = PORT_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "argos-update-bound-port-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let vms = root.join("vms");
+        fs::create_dir_all(&vms).unwrap();
+        let profile = RepoProfile {
+            ports: vec![ProfilePort {
+                name: "api".into(),
+                guest: 3001,
+            }],
+            ..Default::default()
+        };
+        let bound_port = (APP_PORT_START..=APP_PORT_END)
+            .find(|port| port_available(*port))
+            .unwrap();
+        let current: VmRecord = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "id": "hermes",
+            "name": "Hermes",
+            "status": "running",
+            "host": "here",
+            "ports": [{"name": "api", "guest": 3001, "host": bound_port}]
+        }))
+        .unwrap();
+        let unrelated = serde_json::json!({
+            "schema_version": 1,
+            "id": "unrelated",
+            "name": "Unrelated",
+            "status": "stopped",
+            "host": "here",
+            "ports": [{"name": "other", "guest": 3002, "host": bound_port + 1}]
+        });
+        fs::write(vms.join("unrelated.json"), unrelated.to_string()).unwrap();
+        let listener = TcpListener::bind(("0.0.0.0", bound_port)).unwrap();
+
+        let allocated = allocate_update_port_mappings(&profile, &root, &current).unwrap();
+        assert_eq!(allocated[0].host, bound_port);
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(vms.join("unrelated.json")).unwrap()).unwrap();
+        assert_eq!(saved["ports"][0]["host"], bound_port + 1);
+
+        drop(listener);
         fs::remove_dir_all(root).unwrap();
     }
 

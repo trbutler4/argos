@@ -47,6 +47,7 @@ jobs:
             python3 tests/host_status.py &&
             python3 tests/vm_list.py &&
             python3 tests/vm_resources.py &&
+            python3 tests/vm_host_ports.py &&
             python3 tests/vm_modules.py &&
             python3 tests/vm_fetch.py &&
             python3 tests/credential_sharing.py &&
